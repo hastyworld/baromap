@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>바로맵</title>
+  <meta name="description" content="건설현장과 직원 숙소를 한 지도에서 — 숙소 위치, 거주자, 현장까지 거리">
+  <meta name="theme-color" content="#1F3A68" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#12233F" media="(prefers-color-scheme: dark)">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="바로맵">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="icons/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+  <link rel="stylesheet" href="css/app.css">
+  <script src="config.js"></script>
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="바로맵 처음 화면">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#1F3A68"/><path d="M16 6.5c-4.4 0-8 3.4-8 7.7 0 5.6 8 11.8 8 11.8s8-6.2 8-11.8c0-4.3-3.6-7.7-8-7.7z" fill="#fff"/><path d="M11.8 15.2 16 11.6l4.2 3.6v4.3h-8.4z" fill="#E03131"/></svg>
+      <span id="svc-name">바로맵</span>
+    </a>
+    <span id="sync" class="sync" role="status" hidden></span>
+    <div class="search" role="search">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.3-4.3"/></svg>
+      <input id="q" type="search" placeholder="직원 이름·숙소·현장 검색" autocomplete="off" aria-label="직원 이름, 숙소, 현장 검색" aria-controls="q-results" aria-expanded="false">
+      <div id="q-results" class="q-results" role="listbox" hidden></div>
+    </div>
+    <button type="button" class="icon-btn top-btn" data-act="alerts" aria-label="계약 만료 알림" title="계약 만료 알림">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15zM10 20.5a2 2 0 0 0 4 0"/></svg>
+      <span class="count" id="alert-count" hidden></span>
+    </button>
+    <div class="menu-wrap">
+      <button type="button" class="icon-btn top-btn" data-act="menu" aria-label="메뉴" aria-haspopup="menu" aria-expanded="false" id="menu-btn">
+        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      <div id="menu" class="menu" role="menu" hidden></div>
+    </div>
+  </header>
+
+  <div id="sample-bar" hidden></div>
+
+  <main class="layout">
+    <section id="mapwrap" aria-label="지도">
+      <div id="map" role="application" aria-label="현장·숙소 지도"></div>
+      <div class="map-ui">
+        <div class="legend" aria-hidden="true">
+          <span><i class="lg site"></i>현장</span>
+          <span><i class="lg lodging"></i>숙소</span>
+          <span><i class="lg sel"></i>선택</span>
+        </div>
+        <div class="map-btns">
+          <button type="button" class="tool" data-act="go-site">현장으로</button>
+          <button type="button" class="tool" data-act="fit-all">숙소까지 모두 보기</button>
+        </div>
+      </div>
+      <div id="mode-badge" hidden></div>
+      <div id="pick-banner" hidden></div>
+    </section>
+
+    <aside id="panel" class="sheet" data-sheet="peek" aria-label="현장·숙소 정보">
+      <button type="button" class="sheet-handle" data-act="sheet-toggle" aria-label="정보 창 펼치기·접기"><span></span></button>
+      <div id="panel-body"></div>
+    </aside>
+  </main>
+
+  <input type="file" id="json-file" accept=".json,application/json" hidden>
+  <noscript>바로맵을 사용하려면 브라우저에서 JavaScript를 켜주세요.</noscript>
+</body>
+</html>

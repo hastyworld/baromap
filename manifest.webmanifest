@@ -1,0 +1,21 @@
+{
+  "id": "./",
+  "name": "바로맵 — 현장·숙소 지도",
+  "short_name": "바로맵",
+  "description": "건설현장과 직원 숙소를 한 지도에서. 숙소 위치, 거주자, 현장까지 거리를 바로 확인합니다.",
+  "start_url": "./?source=app",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#F2F4F7",
+  "theme_color": "#1F3A68",
+  "lang": "ko",
+  "dir": "ltr",
+  "categories": ["business", "productivity", "navigation"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
