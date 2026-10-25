@@ -3,7 +3,7 @@ import { store, state } from './ctx.js';
 import { SHEETS, parseWorkbook, templateRows, exportRows, runImport } from './excel.js';
 import { searchAddress, geoMode } from './geo.js';
 import { todayStr } from './model.js';
-import { $, esc, icon, onAction, openModal, toast, loadScript } from './util.js';
+import { $, esc, icon, onAction, openModal, toast, loadScript, appDownloadBlocked } from './util.js';
 
 const XLSX_SRC = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
 
@@ -13,6 +13,7 @@ async function xlsx() {
 }
 
 async function writeBook(filename, rowsByKind) {
+  if (appDownloadBlocked()) return;
   const X = await xlsx();
   const wb = X.utils.book_new();
   for (const [kind, rows] of Object.entries(rowsByKind)) {

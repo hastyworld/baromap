@@ -236,7 +236,16 @@ export async function copyText(text) {
 
 // ---------------------------------------------------------------- 파일·스크립트
 
+// 바로맵 안드로이드 앱 안에서는 파일 내려받기가 안 된다(웹뷰 제약) → 웹 브라우저 안내
+export const isAppView = () => /BaromapApp/.test(navigator.userAgent);
+export function appDownloadBlocked() {
+  if (!isAppView()) return false;
+  toast('앱에서는 파일 내려받기가 안 됩니다. 노트북·휴대폰 브라우저에서 바로맵 주소로 들어가 이용해주세요.', 'warn');
+  return true;
+}
+
 export function download(filename, content, type = 'application/octet-stream') {
+  if (appDownloadBlocked()) return;
   const blob = content instanceof Blob ? content : new Blob([content], { type });
   const url = URL.createObjectURL(blob);
   const a = Object.assign(document.createElement('a'), { href: url, download: filename });

@@ -3,7 +3,7 @@
 // - 버전이 고정된 CDN 파일(Leaflet·SheetJS·Supabase·글꼴)은 "보관본 먼저"
 // - 데이터(Supabase)·지도 타일·카카오 API는 건드리지 않는다
 // 화면 파일을 추가·삭제하면 SHELL과 VERSION을 함께 고친다.
-const VERSION = 'baromap-0.3.0';
+const VERSION = 'baromap-0.3.1';
 const SHELL = [
   './', 'index.html', 'config.js', 'manifest.webmanifest', 'favicon.svg',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
@@ -58,6 +58,7 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin === self.location.origin) {
+    if (url.pathname.includes('/download/')) return; // 앱 파일은 보관하지 않는다
     e.respondWith(networkFirst(req));
   } else if (CDN.test(req.url)) {
     e.respondWith(cacheFirst(req));

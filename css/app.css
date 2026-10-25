@@ -154,11 +154,12 @@ code { font-size: 12px; background: var(--surface-2); border: 1px solid var(--li
 .brand .logo { width: 30px; height: 30px; }
 .brand .logo rect { fill: rgba(255, 255, 255, .14); }
 .topbar .search {
-  flex: 1; max-width: 460px; margin-left: 12px; position: relative; display: flex; align-items: center; gap: 8px;
+  flex: 1; min-width: 0; max-width: 460px; margin-left: 12px; position: relative; display: flex; align-items: center; gap: 8px;
   height: 38px; padding: 0 12px; border-radius: 9px; background: rgba(255, 255, 255, .12); color: rgba(255, 255, 255, .75);
 }
 .topbar .search:focus-within { background: #fff; color: #5b6575; }
-.topbar .search input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: #fff; height: 100%; }
+/* 입력칸 기본 너비(글꼴마다 다름)에 막혀 휴대폰에서 메뉴 버튼이 화면 밖으로 밀리지 않도록 width: 0 */
+.topbar .search input { flex: 1; min-width: 0; width: 0; border: 0; outline: 0; background: none; color: #fff; height: 100%; }
 .topbar .search input::placeholder { color: rgba(255, 255, 255, .7); }
 .topbar .search:focus-within input { color: #141922; }
 .topbar .search:focus-within input::placeholder { color: #8a93a2; }
@@ -504,6 +505,13 @@ body.modal-open { overflow: hidden; }
 .sync.off { background: rgba(255, 107, 107, .2); }
 .sync.off i { background: #ff6b6b; }
 #sample-bar[data-kind=offline] { background: var(--crit-soft); color: var(--crit); }
+#install-bar {
+  flex: none; display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; padding: 6px 10px;
+  font-size: 13px; background: var(--info-soft); color: var(--info); border-bottom: 1px solid var(--line);
+}
+#install-bar[data-kind=warn] { background: var(--warn-soft); color: var(--warn); }
+#install-bar .ic { width: 16px; height: 16px; }
+body.auth-open #install-bar { position: fixed; top: 0; left: 0; right: 0; z-index: 1600; visibility: visible; }
 .menu-user { display: flex; align-items: center; gap: 10px; padding: 6px 8px 4px; }
 .menu-user b { display: block; font-size: 14px; }
 .menu-user small { display: block; color: var(--ink-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 190px; }
