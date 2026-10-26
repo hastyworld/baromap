@@ -71,6 +71,9 @@ const ICONS = {
   door: '<path d="M5 21h14M7 21V3.5h10V21M13.5 12.5h.01"/>',
   calendar: '<rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
   building: '<path d="M4 21V5.5L12 3v18M12 8.5h8V21M3 21h18M7 8h2M7 12h2M7 16h2M15 12h2M15 16h2"/>',
+  camera: '<path d="M3.5 8.5h3.5l1.7-2.5h6.6L17 8.5h3.5v11h-17z"/><circle cx="12" cy="13.5" r="3.6"/>',
+  globe: '<circle cx="12" cy="12" r="8.5"/><ellipse cx="12" cy="12" rx="3.7" ry="8.5"/><path d="M3.5 12h17"/>',
+  street: '<circle cx="12" cy="4.8" r="2"/><path d="M9.2 21v-6.3H7.6V10a2 2 0 0 1 2-2h4.8a2 2 0 0 1 2 2v4.7h-1.6V21M12 14.7V21"/>',
 };
 
 export function icon(name, cls = '') {

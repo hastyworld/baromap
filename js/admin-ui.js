@@ -7,7 +7,7 @@ const FIELD_LABEL = {
   manager: '현장소장', phone: '연락처', memo: '메모', siteId: '현장', addressDetail: '동·호수', type: '유형', capacity: '정원',
   leaseEnd: '계약 종료일', lodgingId: '숙소', rank: '직급', title: '직책', dept: '소속·공종', moveIn: '입주일',
 };
-const TABLE_LABEL = { sites: '현장', lodgings: '숙소', residents: '거주자' };
+const TABLE_LABEL = { sites: '현장', lodgings: '숙소', residents: '거주자', site_photos: '현장 사진' };
 const ACTION_LABEL = { insert: '등록', update: '수정', delete: '삭제' };
 
 let users = [];

@@ -2,10 +2,11 @@
 // - 로그인한 사용자만 읽고, 권한(관리자/현장 담당/조회)은 DB의 RLS 정책이 최종 판단한다(supabase/schema.sql).
 // - 다른 사람이 고친 내용은 실시간(Realtime)으로 들어와 화면이 바로 바뀐다.
 // - 인터넷이 끊기면 마지막으로 받은 데이터를 읽기 전용으로 보여준다.
-import { validate, normalizeData, newId, clone, KINDS } from './store.js';
+import { validate, normalizeData, newId, clone, byTaken, KINDS } from './store.js';
 
 const SUPABASE_SRC = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm';
 const CACHE_KEY = 'baromap.remote.cache.v1';
+const BUCKET = 'site-photos'; // 현장 360° 사진 원본(비공개). 경로는 "현장id/사진id.jpg"
 const TABLES = Object.keys(KINDS);
 const DATE_FIELDS = { sites: ['startDate', 'endDate'], lodgings: ['leaseEnd'], residents: ['moveIn'] };
 const ROLE_RANK = { pending: 0, viewer: 1, manager: 2, admin: 3 };
@@ -34,6 +35,17 @@ export function friendlyError(error) {
   if (/Failed to fetch|NetworkError|network|fetch failed/i.test(msg)) return new Error('서버에 연결할 수 없습니다. 인터넷 연결을 확인해주세요.');
   return new Error(msg ? `처리 중 오류가 발생했습니다: ${msg}` : '처리 중 오류가 발생했습니다.');
 }
+
+function storageError(error) {
+  const msg = String(error?.message || error || '');
+  if (/bucket not found/i.test(msg)) return new Error('사진 저장 공간이 아직 준비되지 않았습니다. 관리자에게 supabase/schema.sql 실행을 요청하세요.');
+  if (/maximum allowed size|too large|payload/i.test(msg)) return new Error('사진 파일이 너무 큽니다(15MB까지).');
+  if (/mime/i.test(msg)) return new Error('JPG 사진만 올릴 수 있습니다.');
+  if (/object not found|not_found/i.test(msg)) return new Error('사진 파일을 찾지 못했습니다. 다른 사람이 지웠을 수 있습니다.');
+  return friendlyError(error);
+}
+
+const photoFromDb = (row) => ({ ...row, takenAt: row.takenAt || '' });
 
 function authError(error) {
   const msg = String(error?.message || error || '');
@@ -65,6 +77,8 @@ export async function createRemoteStore({ url, anonKey, client, storage = global
   let dbChannel = null;
   let meChannel = null;
   const listeners = new Set();
+  const photoCache = new Map(); // siteId → 사진 정보 목록(현장을 열 때 받는다)
+  const signed = new Map(); // 원본 경로 → { url, until } 임시 열람 주소
 
   let queued = false;
   function notify() {
@@ -171,6 +185,20 @@ export async function createRemoteStore({ url, anonKey, client, storage = global
     notify();
   }
 
+  // 사진 변경 반영. 아직 열어보지 않은 현장의 사진은 열 때 받으므로 건너뛴다.
+  function applyPhoto(payload) {
+    if (payload.eventType === 'DELETE') {
+      const id = payload.old?.id;
+      for (const [siteId, list] of photoCache) photoCache.set(siteId, list.filter((p) => p.id !== id));
+    } else if (payload.new) {
+      const rec = photoFromDb(payload.new);
+      const list = photoCache.get(rec.siteId);
+      if (!list) return;
+      photoCache.set(rec.siteId, [...list.filter((p) => p.id !== rec.id), rec].sort(byTaken));
+    }
+    notify();
+  }
+
   async function subscribeRealtime() {
     if (dbChannel) sb.removeChannel(dbChannel);
     setStatus('connecting');
@@ -183,6 +211,7 @@ export async function createRemoteStore({ url, anonKey, client, storage = global
     for (const t of TABLES) {
       dbChannel.on('postgres_changes', { event: '*', schema: 'public', table: t }, (p) => apply(t, p));
     }
+    dbChannel.on('postgres_changes', { event: '*', schema: 'public', table: 'site_photos' }, applyPhoto);
     let first = true;
     dbChannel.subscribe((s) => {
       if (s === 'SUBSCRIBED') {
@@ -343,13 +372,78 @@ export async function createRemoteStore({ url, anonKey, client, storage = global
     async remove(kind, id) {
       guardOnline();
       const counts = countCascade(kind, id);
+      // 현장을 지우면 사진 정보는 DB가 함께 지우고, 원본 파일은 여기서 지운다.
+      let photoPaths = [];
+      if (kind === 'sites') {
+        try {
+          const { data: ph } = await sb.from('site_photos').select('path').eq('siteId', id);
+          photoPaths = (ph || []).map((p) => p.path);
+        } catch { /* 사진 목록을 못 받아도 현장 삭제는 진행 */ }
+      }
       const { data: gone, error } = await sb.from(kind).delete().eq('id', id).select('id');
       if (error) throw friendlyError(error);
       if (!gone?.length) throw friendlyError({ code: '42501' });
+      if (photoPaths.length) {
+        try { await sb.storage.from(BUCKET).remove(photoPaths); } catch { /* 남은 파일은 관리자가 Storage에서 정리 */ }
+      }
+      if (kind === 'sites') photoCache.delete(id);
       removeLocal(kind, id);
       cacheWrite();
       notify();
       return counts;
+    },
+
+    // 현장 360° 사진. 목록은 현장을 열 때 list()로 받아 두고, 화면은 cached()로 읽는다.
+    photos: {
+      cached: (siteId) => (photoCache.has(siteId) ? clone(photoCache.get(siteId)) : undefined),
+
+      async list(siteId) {
+        const { data: rows, error } = await sb.from('site_photos').select('*').eq('siteId', siteId);
+        if (error) throw friendlyError(error);
+        const list = rows.map(photoFromDb).sort(byTaken);
+        photoCache.set(siteId, list);
+        notify();
+        return clone(list);
+      },
+
+      // 원본을 저장 공간에 먼저 올리고 정보를 표에 넣는다. 표에 못 넣으면 올린 파일을 지운다.
+      async add(input) {
+        guardOnline();
+        const clean = validate('sitePhotos', input, data);
+        if (!input.file) throw new Error('사진 파일을 선택해주세요.');
+        const id = newId('sitePhotos');
+        const path = `${clean.siteId}/${id}.jpg`;
+        const bucket = sb.storage.from(BUCKET);
+        const up = await bucket.upload(path, input.file, { contentType: input.file.type || 'image/jpeg', upsert: false, cacheControl: '31536000' });
+        if (up.error) throw storageError(up.error);
+        const row = { id, ...clean, takenAt: clean.takenAt || null, path };
+        const { data: saved, error } = await sb.from('site_photos').insert(row).select().single();
+        if (error) {
+          try { await bucket.remove([path]); } catch { /* 무시 */ }
+          throw friendlyError(error);
+        }
+        applyPhoto({ eventType: 'INSERT', new: saved });
+        return clone(photoFromDb(saved));
+      },
+
+      async remove(id) {
+        guardOnline();
+        const { data: gone, error } = await sb.from('site_photos').delete().eq('id', id).select('id, path');
+        if (error) throw friendlyError(error);
+        if (!gone?.length) throw friendlyError({ code: '42501' });
+        try { await sb.storage.from(BUCKET).remove(gone.map((g) => g.path)); } catch { /* 남은 파일은 관리자가 정리 */ }
+        applyPhoto({ eventType: 'DELETE', old: { id } });
+      },
+
+      // 비공개 원본을 1시간 동안 볼 수 있는 임시 주소
+      async url(photo) {
+        const hit = signed.get(photo.path);
+        if (hit && hit.until > Date.now()) return hit.url;
+        const { data: d, error } = await sb.storage.from(BUCKET).createSignedUrl(photo.path, 3600);
+        if (error) throw storageError(error);
+        signed.set(photo.path, { url: d.signedUrl, until: Date.now() + 50 * 60000 });
+        return d.signedUrl;
+      },
     },
 
     exportJson() {

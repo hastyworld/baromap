@@ -98,15 +98,74 @@ export function validate(kind, input, data) {
       memo: str(b.memo, 1000),
     };
   }
+  // 현장 360° 사진의 정보(원본 파일은 저장소가 따로 보관). 미리보기(thumb)는 작은 data:image 주소.
+  if (kind === 'sitePhotos') {
+    const siteId = str(b.siteId, 40);
+    if (!siteId || !data.sites.some((s) => s.id === siteId)) fail('사진을 올릴 현장을 선택해주세요.');
+    const thumb = b.thumb == null ? '' : String(b.thumb);
+    if (thumb && (!/^data:image\/(jpeg|png|webp);base64,/.test(thumb) || thumb.length > 200000)) fail('미리보기 이미지가 올바르지 않습니다.');
+    return {
+      siteId,
+      takenAt: date(b.takenAt, '촬영일'),
+      caption: str(b.caption, 100),
+      thumb,
+      width: int(b.width, '사진 너비', 1, 20000),
+      height: int(b.height, '사진 높이', 1, 20000),
+    };
+  }
   throw new Error(`알 수 없는 종류: ${kind}`);
 }
 
 // ---------------------------------------------------------------- 저장소
 
 const empty = () => ({ format: FORMAT, sample: false, sites: [], lodgings: [], residents: [] });
-const ID_PREFIX = { sites: 's_', lodgings: 'l_', residents: 'r_' };
+const ID_PREFIX = { sites: 's_', lodgings: 'l_', residents: 'r_', sitePhotos: 'p_' };
 export const newId = (kind) => `${ID_PREFIX[kind] || 'x_'}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 export const clone = (x) => JSON.parse(JSON.stringify(x));
+
+// 사진 목록 순서: 최근 촬영일 먼저(날짜 없는 사진은 뒤), 같은 날이면 나중에 올린 것 먼저
+export const byTaken = (a, b) => (b.takenAt ? 1 : 0) - (a.takenAt ? 1 : 0)
+  || String(b.takenAt || '').localeCompare(String(a.takenAt || ''))
+  || String(b.createdAt || '').localeCompare(String(a.createdAt || ''));
+
+// ---------------------------------------------------------------- 현장 사진 보관 (브라우저 저장 모드)
+// 사진 원본은 커서 localStorage 대신 IndexedDB에 둔다. IndexedDB가 없으면(Node 테스트) 메모리.
+
+export function memoryPhotoBackend() {
+  const m = new Map();
+  return {
+    async all() { return [...m.values()]; },
+    async get(id) { return m.get(id) || null; },
+    async put(rec) { m.set(rec.id, rec); },
+    async del(ids) { for (const id of ids) m.delete(id); },
+  };
+}
+
+function idbPhotoBackend() {
+  let opened = null;
+  const open = () => (opened ||= new Promise((resolve, reject) => {
+    const req = indexedDB.open('baromap-photos', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('photos', { keyPath: 'id' });
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  }));
+  const run = async (mode, fn) => {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('photos', mode);
+      const req = fn(tx.objectStore('photos'));
+      tx.oncomplete = () => resolve(req?.result);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('사진 보관소 오류'));
+    });
+  };
+  return {
+    all: () => run('readonly', (s) => s.getAll()),
+    get: async (id) => (await run('readonly', (s) => s.get(id))) || null,
+    put: (rec) => run('readwrite', (s) => s.put(rec)),
+    del: (ids) => run('readwrite', (s) => { for (const id of ids) s.delete(id); }),
+  };
+}
 
 // 외부 데이터(JSON 파일 등)를 검증해 저장 형태로 바꾼다. 참조가 끊긴 레코드는 오류로 돌려준다.
 export function normalizeData(obj, stamp = new Date().toISOString()) {
@@ -144,11 +203,15 @@ export async function openStore(cfg = {}, opts = {}) {
 }
 
 /**
- * @param {{ storage?: Storage, now?: () => Date }} [opts]
+ * @param {{ storage?: Storage, now?: () => Date, photoBackend?: ReturnType<typeof memoryPhotoBackend> }} [opts]
  */
-export function createStore({ storage = globalThis.localStorage, now = () => new Date() } = {}) {
+export function createStore({ storage = globalThis.localStorage, now = () => new Date(), photoBackend } = {}) {
   let data = empty();
   const listeners = new Set();
+  const photoDb = photoBackend || (globalThis.indexedDB ? idbPhotoBackend() : memoryPhotoBackend());
+  const photoCache = new Map(); // siteId → 사진 정보 목록(원본 제외)
+
+  const notify = () => { for (const fn of listeners) fn(); };
 
   function persist() {
     try {
@@ -156,7 +219,18 @@ export function createStore({ storage = globalThis.localStorage, now = () => new
     } catch {
       throw new Error('브라우저 저장 공간이 부족해 저장하지 못했습니다. 데이터를 파일로 내보낸 뒤 정리해주세요.');
     }
-    for (const fn of listeners) fn();
+    notify();
+  }
+
+  // 현장이 없어진 사진(현장 삭제·전체 삭제·파일 가져오기 뒤)은 원본까지 지운다.
+  async function prunePhotos() {
+    try {
+      const live = new Set(data.sites.map((s) => s.id));
+      const all = await photoDb.all();
+      const gone = all.filter((p) => !live.has(p.siteId)).map((p) => p.id);
+      if (gone.length) await photoDb.del(gone);
+      for (const id of photoCache.keys()) if (!live.has(id)) photoCache.delete(id);
+    } catch { /* 정리 실패는 다음에 다시 시도된다 */ }
   }
 
   const normalize = (obj) => normalizeData(obj, now().toISOString());
@@ -242,6 +316,7 @@ export function createStore({ storage = globalThis.localStorage, now = () => new
         removed.residents = rb - data.residents.length;
       }
       persist();
+      if (siteIds.length) await prunePhotos();
       return removed;
     },
 
@@ -254,17 +329,62 @@ export function createStore({ storage = globalThis.localStorage, now = () => new
       if (obj?.format && obj.format !== FORMAT) fail('다른 형식의 파일입니다. 바로맵에서 내보낸 JSON 파일을 선택해주세요.');
       data = normalize({ ...obj, sample: false });
       persist();
+      await prunePhotos();
       return { sites: data.sites.length, lodgings: data.lodgings.length, residents: data.residents.length };
     },
 
     async clear() {
       data = empty();
       persist();
+      await prunePhotos();
     },
 
     async resetSample(sampleFactory) {
       data = normalize({ ...sampleFactory(now()), sample: true });
       persist();
+      await prunePhotos();
+    },
+
+    // 현장 360° 사진. 목록은 현장을 열 때 list()로 받아 두고, 화면은 cached()로 읽는다.
+    photos: {
+      cached: (siteId) => (photoCache.has(siteId) ? clone(photoCache.get(siteId)) : undefined),
+
+      async list(siteId) {
+        const all = await photoDb.all();
+        const list = all.filter((p) => p.siteId === siteId).map(({ blob, ...p }) => p).sort(byTaken);
+        photoCache.set(siteId, list);
+        notify();
+        return clone(list);
+      },
+
+      // input: { siteId, file(Blob), thumb, width, height, takenAt, caption }
+      async add(input) {
+        const clean = validate('sitePhotos', input, data);
+        if (!(input.file instanceof Blob)) fail('사진 파일을 선택해주세요.');
+        const stamp = now().toISOString();
+        const rec = { id: newId('sitePhotos'), ...clean, createdAt: stamp, updatedAt: stamp };
+        try {
+          await photoDb.put({ ...rec, blob: input.file });
+        } catch {
+          throw new Error('브라우저 저장 공간이 부족해 사진을 저장하지 못했습니다.');
+        }
+        photoCache.set(clean.siteId, [...(photoCache.get(clean.siteId) || []), rec].sort(byTaken));
+        notify();
+        return clone(rec);
+      },
+
+      async remove(id) {
+        await photoDb.del([id]);
+        for (const [siteId, list] of photoCache) photoCache.set(siteId, list.filter((p) => p.id !== id));
+        notify();
+      },
+
+      // 원본을 볼 주소. 다 보면 URL.revokeObjectURL로 풀어준다.
+      async url(photo) {
+        const rec = await photoDb.get(photo.id);
+        if (!rec?.blob) throw new Error('사진 파일을 찾지 못했습니다.');
+        return URL.createObjectURL(rec.blob);
+      },
     },
 
     // 예시 데이터 표시를 끈다(사용자가 자기 데이터를 쓰기 시작했을 때).

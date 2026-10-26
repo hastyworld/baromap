@@ -54,3 +54,27 @@ export function distanceM(a, b) {
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(h));
 }
+
+// a에서 b를 바라보는 방향(도). 정북 0°, 시계 방향. 로드뷰가 현장 쪽을 보게 할 때 쓴다.
+export function bearingDeg(a, b) {
+  const rad = (d) => (d * Math.PI) / 180;
+  const dLng = rad(b.lng - a.lng);
+  const y = Math.sin(dLng) * Math.cos(rad(b.lat));
+  const x = Math.cos(rad(a.lat)) * Math.sin(rad(b.lat)) - Math.sin(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.cos(dLng);
+  return (Math.round((Math.atan2(y, x) * 180) / Math.PI) + 360) % 360;
+}
+
+// 사진 가로:세로 비율로 둘러볼 수 있는 범위(도)를 정한다.
+// 2:1이면 360° 카메라 사진(사방), 그보다 길면 휴대폰 파노라마(좌우로 최대 360°), 짧으면 일반 사진.
+export function panoView(width, height) {
+  const r = width > 0 && height > 0 ? width / height : 2;
+  if (r >= 1.9 && r <= 2.1) return { kind: 'sphere', haov: 360, vaov: 180 };
+  if (r > 2.1) {
+    const haov = Math.min(360, Math.round(r * 60));
+    return { kind: 'pano', haov, vaov: Math.round(haov / r) };
+  }
+  if (r >= 1) return { kind: 'photo', haov: Math.round(55 * r), vaov: 55 };
+  return { kind: 'photo', haov: 50, vaov: Math.round(50 / r) };
+}
+
+export const PANO_LABEL = { sphere: '360° 사진', pano: '파노라마', photo: '일반 사진' };

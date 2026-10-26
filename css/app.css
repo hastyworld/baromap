@@ -346,6 +346,83 @@ code { font-size: 12px; background: var(--surface-2); border: 1px solid var(--li
 }
 .chip-link:hover { border-color: var(--lodging); color: var(--lodging); }
 
+/* 현장 둘러보기: 최근 360° 사진을 크게, 나머지는 날짜별 작은 사진 */
+.tour { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.tour-hero {
+  position: relative; display: block; width: 100%; aspect-ratio: 2 / 1; padding: 0; border: 0; border-radius: 11px;
+  overflow: hidden; cursor: pointer; background: #1b2230;
+}
+.tour-hero img { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform .4s ease; }
+.tour-hero:hover img { transform: scale(1.04); }
+.tour-hero::after { content: ''; position: absolute; inset: 0; background: linear-gradient(to top, rgba(0, 0, 0, .55), transparent 50%); }
+.tour-play {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 1; display: inline-flex; align-items: center; gap: 6px;
+  height: 36px; padding: 0 14px; border-radius: 999px; background: rgba(12, 17, 26, .6); border: 1px solid rgba(255, 255, 255, .4);
+  color: #fff; font-weight: 700; font-size: 13.5px; white-space: nowrap; backdrop-filter: blur(4px);
+}
+.tour-cap {
+  position: absolute; left: 10px; right: 10px; bottom: 7px; z-index: 1; color: #fff; font-size: 12.5px; font-weight: 600; text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-shadow: 0 1px 2px rgba(0, 0, 0, .5);
+}
+.tour-strip { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+.tour-thumb {
+  flex: none; width: 92px; padding: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; cursor: pointer;
+  background: var(--surface-2); color: var(--ink-2); font-size: 11.5px; font-weight: 600; text-align: left;
+}
+.tour-thumb img { width: 100%; aspect-ratio: 2 / 1; object-fit: cover; display: block; }
+.tour-thumb span { display: block; padding: 2px 6px 3px; }
+.tour-thumb:hover { border-color: var(--lodging); color: var(--lodging); }
+.tour-empty {
+  display: flex; align-items: center; gap: 10px; padding: 12px; border: 1.5px dashed var(--line-2); border-radius: 11px;
+  color: var(--ink-2); font-size: 13px; background: var(--surface-2);
+}
+.tour-empty .ic { width: 24px; height: 24px; color: var(--ink-3); }
+.tour-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.photo-site { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; }
+.photo-preview { display: flex; gap: 12px; align-items: center; margin: 10px 0 14px; }
+.photo-preview img { width: 150px; aspect-ratio: 2 / 1; object-fit: cover; border-radius: 8px; flex: none; background: var(--surface-2); }
+.photo-preview p { margin: 2px 0 0; }
+
+/* 전체 화면 보기(360° 사진·로드뷰): 지도 대신 현장만. 확인 창(#modal 2000)보다 아래 */
+body.viewer-open { overflow: hidden; }
+.viewer { position: fixed; inset: 0; z-index: 1900; background: #0b0f16; color: #fff; }
+.viewer-stage { position: absolute; inset: 0; }
+.viewer-head {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 3; display: flex; align-items: center; gap: 10px;
+  padding: calc(10px + env(safe-area-inset-top)) 10px 18px 16px; background: linear-gradient(to bottom, rgba(0, 0, 0, .7), transparent);
+  pointer-events: none;
+}
+.viewer-head > * { pointer-events: auto; }
+.viewer-title { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.viewer-title b { font-size: 16px; letter-spacing: -0.02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.viewer-title span {
+  font-size: 12.5px; line-height: 1.4; color: rgba(255, 255, 255, .82); overflow: hidden;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.viewer-actions { display: flex; gap: 8px; }
+.viewer-btn {
+  width: 40px; height: 40px; display: grid; place-items: center; border: 0; border-radius: 50%; cursor: pointer;
+  background: rgba(255, 255, 255, .16); color: #fff;
+}
+.viewer-btn:hover { background: rgba(255, 255, 255, .28); }
+.viewer-btn .ic { width: 20px; height: 20px; }
+.viewer-msg {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 2; margin: 0; max-width: calc(100% - 48px);
+  padding: 12px 18px; border-radius: 12px; background: rgba(0, 0, 0, .65); font-size: 14px; text-align: center;
+}
+.viewer-dates {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; display: flex; gap: 6px; overflow-x: auto;
+  padding: 18px 12px calc(12px + env(safe-area-inset-bottom)); background: linear-gradient(to top, rgba(0, 0, 0, .65), transparent);
+}
+.viewer-dates button {
+  flex: none; height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, .4);
+  background: rgba(0, 0, 0, .35); color: #fff; font-weight: 600; font-size: 12.5px; cursor: pointer; white-space: nowrap;
+}
+.viewer-dates button.on { background: #fff; color: #111; border-color: #fff; }
+/* Pannellum 기본 버튼(확대·축소)이 제목 줄에 가리지 않게 */
+.viewer .pnlm-controls-container { top: calc(72px + env(safe-area-inset-top)); left: 12px; }
+.viewer .pnlm-load-box { font-family: var(--font); }
+
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); margin: 12px 0 4px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
 .stats > div { padding: 9px 12px; display: flex; flex-direction: column; }
 .stats > div + div { border-left: 1px solid var(--line); }

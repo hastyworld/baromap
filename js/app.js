@@ -13,6 +13,7 @@ import { excelDialog, exportExcel } from './excel-ui.js';
 import { initPwa, install, canInstall } from './pwa.js';
 import { ensureSignedIn, accountDialog } from './auth-ui.js';
 import { usersDialog, auditDialog, pendingCount } from './admin-ui.js';
+import { photoLabel } from './photos.js';
 
 let map = null;
 const isMobile = () => matchMedia('(max-width: 760px)').matches;
@@ -335,12 +336,67 @@ function phoneLinks(phone, label = '연락처') {
     <button type="button" class="icon-btn xs" data-act="copy" data-text="${esc(phone)}" aria-label="${label} 복사" title="복사">${icon('copy')}</button></span>`;
 }
 
-function openIn(p) {
+function openIn(p, { roadview = true } = {}) {
   return `<div class="open-in"><span class="muted small">지도 앱에서 열기</span>
     <a class="chip-link" href="${links.kakao(p)}" target="_blank" rel="noopener">카카오맵</a>
     <a class="chip-link" href="${links.naver(p)}" target="_blank" rel="noopener">네이버지도</a>
     <a class="chip-link" href="${links.google(p)}" target="_blank" rel="noopener">구글지도</a>
-    <a class="chip-link" href="${links.roadview(p)}" target="_blank" rel="noopener">로드뷰</a></div>`;
+    ${roadview ? `<a class="chip-link" href="${links.roadview(p)}" target="_blank" rel="noopener">로드뷰</a>` : ''}</div>`;
+}
+
+// ---- 현장 둘러보기: 360° 사진(최근 촬영 크게) + 로드뷰. 사진 목록은 현장을 열 때 받는다.
+
+const photoErrors = {};
+const photoLoading = new Set();
+
+async function loadPhotos(siteId) {
+  if (!store.photos || photoLoading.has(siteId)) return;
+  photoLoading.add(siteId);
+  delete photoErrors[siteId];
+  try {
+    await store.photos.list(siteId);
+  } catch (err) {
+    photoErrors[siteId] = err.message;
+    if (state.siteId === siteId) renderPanel();
+  } finally {
+    photoLoading.delete(siteId);
+  }
+}
+onAction('photo-retry', () => loadPhotos(state.siteId));
+
+function tourBlock(s) {
+  if (!store.photos) return '';
+  const photos = store.photos.cached(s.id);
+  const err = photoErrors[s.id];
+  if (photos === undefined && !err) queueMicrotask(() => loadPhotos(s.id));
+  const kakao = geoMode() === 'kakao';
+  const editable = canEdit(s.id);
+  const list = photos || [];
+  if (photos && !list.length && !kakao && !editable) return '';
+  const [first, ...rest] = list;
+  const hero = first
+    ? `<button type="button" class="tour-hero" data-act="photo-open" data-id="${esc(first.id)}" aria-label="360° 사진 보기 ${esc(photoLabel(first))}">
+        ${first.thumb ? `<img src="${esc(first.thumb)}" alt="">` : ''}
+        <span class="tour-play">${icon('globe')}현장 둘러보기</span>
+        <span class="tour-cap">${esc(photoLabel(first))}</span></button>`
+    : photos && editable
+      ? `<div class="tour-empty">${icon('camera')}<span>360° 사진을 올리면 지도 대신 현장을 그대로 둘러볼 수 있어요.</span></div>`
+      : '';
+  const strip = rest.length
+    ? `<div class="tour-strip">${rest.map((p) => `<button type="button" class="tour-thumb" data-act="photo-open" data-id="${esc(p.id)}" title="${esc(photoLabel(p))}">
+        ${p.thumb ? `<img src="${esc(p.thumb)}" alt="">` : ''}<span>${esc(p.takenAt ? fmtDate(p.takenAt) : '날짜 없음')}</span></button>`).join('')}</div>`
+    : '';
+  let status = '';
+  if (err) status = `<span class="t-warn small">${icon('alert')}사진을 불러오지 못했습니다</span><button type="button" class="link small" data-act="photo-retry">다시 시도</button>`;
+  else if (!photos) status = '<span class="muted small loading">사진 확인 중…</span>';
+  else if (!list.length && !editable) status = '<span class="muted small">아직 360° 사진이 없습니다</span>';
+  return `<div class="tour">${hero}${strip}
+    <div class="tour-actions">
+      ${kakao ? `<button type="button" class="btn sm" data-act="roadview">${icon('street')}로드뷰</button>` : ''}
+      ${editable ? `<button type="button" class="btn sm ${first ? '' : 'primary'}" data-act="photo-add">${icon('camera')}360° 사진 올리기</button>` : ''}
+      ${status}
+    </div>
+  </div>`;
 }
 
 function progressBlock(s) {
@@ -392,6 +448,7 @@ function siteView(s) {
           ${store.can('deleteSite') ? `<button type="button" class="icon-btn" data-act="del-site" data-id="${esc(s.id)}" aria-label="현장 삭제" title="삭제">${icon('trash')}</button>` : ''}
         </div>
       </header>
+      ${tourBlock(s)}
       ${progressBlock(s)}
       <dl class="kvs">
         ${kv('발주처', esc(s.client))}
@@ -400,7 +457,7 @@ function siteView(s) {
       </dl>
       ${s.overview ? `<div class="text-block"><h3>공사 개요</h3><p>${esc(s.overview)}</p></div>` : ''}
       ${s.memo ? `<div class="text-block memo"><h3>메모</h3><p>${esc(s.memo)}</p></div>` : ''}
-      ${openIn(s)}
+      ${openIn(s, { roadview: geoMode() !== 'kakao' })}
     </article>
 
     <div class="stats">
