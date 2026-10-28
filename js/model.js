@@ -78,3 +78,75 @@ export function panoView(width, height) {
 }
 
 export const PANO_LABEL = { sphere: '360° 사진', pano: '파노라마', photo: '일반 사진' };
+
+// ---------------------------------------------------------------- 공정 현황(골구도)
+// 세대 키는 "층:라인"(10층 2호 라인 → "10:2"), 화면에는 호수(1002호)로 보인다.
+
+export const unitKey = (floor, line) => `${floor}:${line}`;
+
+export function unitLabel(floor, line) {
+  return /^\d{1,2}$/.test(line) ? `${floor}${line.padStart(2, '0')}` : `${floor}${line}`;
+}
+
+// 동의 모든 세대(라인 순서, 아래층부터)
+export function buildingUnits(b) {
+  const out = [];
+  for (const ln of b.lines || []) {
+    for (let f = ln.from; f <= ln.to; f++) out.push({ floor: f, line: ln.name, key: unitKey(f, ln.name) });
+  }
+  return out;
+}
+
+// 여러 동을 나란히 그릴 때의 가장 낮은 층·높은 층
+export function floorSpan(buildings) {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const b of buildings) for (const ln of b.lines || []) { min = Math.min(min, ln.from); max = Math.max(max, ln.to); }
+  return min > max ? { min: 1, max: 1 } : { min, max };
+}
+
+// 시트 통계: 공종(1번부터)마다 "그 공종까지 끝난" 세대 수·비율과, 지금 그 공종에 멈춰 있는 세대 수
+// cells: { [buildingId]: { [unitKey]: { step } } }
+export function sheetStats(sheet, buildings, cells = {}) {
+  const n = (sheet?.trades || []).length;
+  const done = Array(n).fill(0);
+  const at = Array(n + 1).fill(0);
+  let total = 0;
+  for (const b of buildings) {
+    for (const u of buildingUnits(b)) {
+      total++;
+      const st = Math.min(n, cells[b.id]?.[u.key]?.step || 0);
+      at[st]++;
+      for (let k = 0; k < st; k++) done[k]++;
+    }
+  }
+  return { total, done, at, pct: done.map((d) => (total ? Math.round((d / total) * 100) : 0)) };
+}
+
+// 칸에 공종 번호를 넣으면 그 공종의 작업일을 남기고, 더 뒤 공종의 날짜는 지운다(되돌릴 때).
+export function nextCell(prev, step, date) {
+  const dates = {};
+  for (const [k, v] of Object.entries(prev?.dates || {})) if (Number(k) <= step) dates[k] = v;
+  if (step > 0 && date) dates[step] = date;
+  return { step, dates };
+}
+
+// 배경색 위에서 잘 읽히는 글자색
+export function inkFor(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return '#111';
+  const v = parseInt(m[1], 16);
+  const lin = (c) => { const s = c / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; };
+  const L = 0.2126 * lin(v >> 16) + 0.7152 * lin((v >> 8) & 255) + 0.0722 * lin(v & 255);
+  return L > 0.42 ? '#111' : '#fff';
+}
+
+// 공종 색(겹치지 않게 차례로). 밝은·어두운 화면 모두에서 구분되는 색.
+export const TRADE_COLORS = ['#4C6EF5', '#12B886', '#FAB005', '#F76707', '#E64980', '#7950F2', '#40C057', '#15AABF', '#E03131', '#82C91E', '#BE4BDB', '#868E96'];
+
+// 공종 시트 예시(현장에서 고쳐 쓴다)
+export const SHEET_PRESETS = [
+  { name: '골조', trades: ['먹매김', '철근', '거푸집', '콘크리트 타설', '양생·해체'] },
+  { name: '세대 마감', trades: ['방수', '미장', '타일', '창호', '도장', '도배', '마루', '가구', '입주청소'] },
+  { name: '설비·전기', trades: ['배관', '배선', '기구 설치', '시운전'] },
+];

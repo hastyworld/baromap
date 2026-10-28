@@ -14,6 +14,8 @@ import { initPwa, install, canInstall } from './pwa.js';
 import { ensureSignedIn, accountDialog } from './auth-ui.js';
 import { usersDialog, auditDialog, pendingCount } from './admin-ui.js';
 import { photoLabel } from './photos.js';
+import { progressSection } from './progress.js';
+import { ensureModels, modelError } from './model3d.js';
 
 let map = null;
 const isMobile = () => matchMedia('(max-width: 760px)').matches;
@@ -60,7 +62,7 @@ function startApp() {
 }
 
 function onDataChange() {
-  // 공유 모드에서 관리자가 내 권한을 승인 대기로 바꾸면 처음 화면으로
+  // 공유 모드에서 운영자가 내 권한을 승인 대기로 바꾸면 처음 화면으로
   if (store.mode === 'remote' && !store.can('view')) {
     location.reload();
     return;
@@ -198,10 +200,10 @@ function syncMap() {
   }
   const lines = [];
   const circles = [];
-  if (site) {
+  if (site && store.can('viewSite', site.id)) {
     for (const l of q.lodgingsOf(site.id)) {
       const sel = state.view === 'lodging' && state.lodgingId === l.id;
-      const o = occupancy(l.capacity, q.residentsOf(l.id).length);
+      const o = occupancy(l.capacity, q.residentCount(l.id));
       items.push({
         key: `l${l.id}`, lat: l.lat, lng: l.lng, z: sel ? 60 : 40,
         html: lodgingMarker(l, o, sel),
@@ -299,7 +301,7 @@ function emptyView() {
   if (!store.can('createSite')) {
     return `<div class="empty-view">
       <h2>아직 등록된 현장이 없습니다</h2>
-      <p class="muted">관리자가 현장을 등록하면 여기에 바로 나타납니다.</p>
+      <p class="muted">운영자가 현장을 등록하면 여기에 바로 나타납니다.</p>
     </div>`;
   }
   const local = store.mode === 'local';
@@ -364,40 +366,51 @@ async function loadPhotos(siteId) {
 }
 onAction('photo-retry', () => loadPhotos(state.siteId));
 
+// 현장 보기: 3D 모델(도면에서 만든 것)을 크게, 그다음 360° 사진·로드뷰
 function tourBlock(s) {
   if (!store.photos) return '';
-  const photos = store.photos.cached(s.id);
-  const err = photoErrors[s.id];
-  if (photos === undefined && !err) queueMicrotask(() => loadPhotos(s.id));
   const kakao = geoMode() === 'kakao';
+  const roadview = kakao ? `<button type="button" class="btn sm" data-act="roadview">${icon('street')}로드뷰</button>` : '';
+  // 배정되지 않은 현장: 모델·사진은 볼 수 없고 로드뷰(공개 거리 사진)만
+  if (!store.can('viewSite', s.id)) return roadview ? `<div class="tour"><div class="tour-actions">${roadview}</div></div>` : '';
+  const photos = store.photos.cached(s.id);
+  const models = store.models?.cached(s.id);
+  const err = photoErrors[s.id] || modelError(s.id);
+  if (photos === undefined && !photoErrors[s.id]) queueMicrotask(() => loadPhotos(s.id));
+  if (store.models && models === undefined && !modelError(s.id)) queueMicrotask(() => ensureModels(s.id));
   const editable = canEdit(s.id);
-  const list = photos || [];
-  if (photos && !list.length && !kakao && !editable) return '';
-  const [first, ...rest] = list;
-  const hero = first
-    ? `<button type="button" class="tour-hero" data-act="photo-open" data-id="${esc(first.id)}" aria-label="360° 사진 보기 ${esc(photoLabel(first))}">
-        ${first.thumb ? `<img src="${esc(first.thumb)}" alt="">` : ''}
-        <span class="tour-play">${icon('globe')}현장 둘러보기</span>
-        <span class="tour-cap">${esc(photoLabel(first))}</span></button>`
-    : photos && editable
-      ? `<div class="tour-empty">${icon('camera')}<span>360° 사진을 올리면 지도 대신 현장을 그대로 둘러볼 수 있어요.</span></div>`
-      : '';
-  const strip = rest.length
-    ? `<div class="tour-strip">${rest.map((p) => `<button type="button" class="tour-thumb" data-act="photo-open" data-id="${esc(p.id)}" title="${esc(photoLabel(p))}">
-        ${p.thumb ? `<img src="${esc(p.thumb)}" alt="">` : ''}<span>${esc(p.takenAt ? fmtDate(p.takenAt) : '날짜 없음')}</span></button>`).join('')}</div>`
-    : '';
+  const pics = photos || [];
+  const mods = models || [];
+  if (photos && models && !pics.length && !mods.length && !roadview && !editable) return '';
+  const [m0] = mods;
+  const [p0] = pics;
+  let hero = '';
+  if (m0) {
+    hero = `<button type="button" class="tour-hero model" data-act="model-open" data-id="${esc(m0.id)}" aria-label="${esc(m0.name)} 3D로 보기">
+      ${m0.thumb ? `<img src="${esc(m0.thumb)}" alt="">` : ''}
+      <span class="tour-play">${icon('cube')}3D로 보기</span>
+      <span class="tour-cap">${esc(m0.name)}${m0.kind === 'unit' ? ' · 세대 타입' : ` · ${m0.floors}층`}</span></button>`;
+  } else if (p0) {
+    hero = `<button type="button" class="tour-hero" data-act="photo-open" data-id="${esc(p0.id)}" aria-label="360° 사진 보기 ${esc(photoLabel(p0))}">
+      ${p0.thumb ? `<img src="${esc(p0.thumb)}" alt="">` : ''}
+      <span class="tour-play">${icon('globe')}현장 둘러보기</span>
+      <span class="tour-cap">${esc(photoLabel(p0))}</span></button>`;
+  } else if (models && editable) {
+    hero = `<div class="tour-empty">${icon('cube')}<span>도면(DXF)을 올리면 벽·기둥을 세워 <b>3D 모델</b>을 자동으로 만들어요. 동은 골구도 층수만큼 쌓습니다.</span></div>`;
+  }
+  const chips = [
+    ...mods.slice(m0 ? 1 : 0).map((m) => `<button type="button" class="btn sm" data-act="model-open" data-id="${esc(m.id)}">${icon('cube')}${esc(m.name)}</button>`),
+    pics.length && m0 ? `<button type="button" class="btn sm" data-act="photo-open" data-id="${esc(p0.id)}">${icon('globe')}360° 사진 ${pics.length}장</button>` : '',
+    roadview,
+    editable ? `<button type="button" class="btn sm ${m0 ? '' : 'primary'}" data-act="model-new">${icon('cube')}도면으로 3D</button>` : '',
+    editable ? `<button type="button" class="btn sm ghost" data-act="photo-add">${icon('camera')}360° 사진</button>` : '',
+  ].filter(Boolean).join('');
   let status = '';
-  if (err) status = `<span class="t-warn small">${icon('alert')}사진을 불러오지 못했습니다</span><button type="button" class="link small" data-act="photo-retry">다시 시도</button>`;
-  else if (!photos) status = '<span class="muted small loading">사진 확인 중…</span>';
-  else if (!list.length && !editable) status = '<span class="muted small">아직 360° 사진이 없습니다</span>';
-  return `<div class="tour">${hero}${strip}
-    <div class="tour-actions">
-      ${kakao ? `<button type="button" class="btn sm" data-act="roadview">${icon('street')}로드뷰</button>` : ''}
-      ${editable ? `<button type="button" class="btn sm ${first ? '' : 'primary'}" data-act="photo-add">${icon('camera')}360° 사진 올리기</button>` : ''}
-      ${status}
-    </div>
-  </div>`;
+  if (err) status = `<span class="t-warn small">${icon('alert')}불러오지 못했습니다</span><button type="button" class="link small" data-act="tour-retry">다시 시도</button>`;
+  else if (!photos || (store.models && !models)) status = '<span class="muted small loading">확인 중…</span>';
+  return `<div class="tour">${hero}<div class="tour-actions">${chips}${status}</div></div>`;
 }
+onAction('tour-retry', () => { loadPhotos(state.siteId); ensureModels(state.siteId); });
 
 function progressBlock(s) {
   const p = siteProgress(s, today());
@@ -434,7 +447,7 @@ function leaseBadge(leaseEnd, { always = false } = {}) {
 
 function siteView(s) {
   const lodgings = q.lodgingsOf(s.id)
-    .map((l) => ({ l, d: distanceM(s, l), o: occupancy(l.capacity, q.residentsOf(l.id).length) }))
+    .map((l) => ({ l, d: distanceM(s, l), o: occupancy(l.capacity, q.residentCount(l.id)) }))
     .sort((a, b) => a.d - b.d);
   const people = lodgings.reduce((a, x) => a + x.o.n, 0);
   const cap = lodgings.reduce((a, x) => a + x.o.cap, 0);
@@ -459,6 +472,14 @@ function siteView(s) {
       ${s.memo ? `<div class="text-block memo"><h3>메모</h3><p>${esc(s.memo)}</p></div>` : ''}
       ${openIn(s, { roadview: geoMode() !== 'kakao' })}
     </article>
+    ${store.can('viewSite', s.id) ? siteDetail(s, lodgings, people, cap) : `<div class="notice locked">${icon('lock')}<span>이 현장의 숙소·거주자·공정 정보는 <b>이 현장에 배정된 사람</b>만 볼 수 있어요. 필요하면 운영자에게 현장 배정을 요청하세요.</span></div>
+    ${nearbySection(s)}`}`;
+}
+
+// 배정된 현장(또는 운영자·관리자)에게만 보이는 부분: 숙소 현황·주변 시설·숙소 목록
+function siteDetail(s, lodgings, people, cap) {
+  return `
+    ${progressSection(s)}
 
     <div class="stats">
       <div><span>숙소</span><b>${lodgings.length}<small>곳</small></b></div>
@@ -560,8 +581,9 @@ function sortResidents(list) {
 
 function lodgingView(l) {
   const s = q.site(l.siteId);
-  const people = sortResidents(q.residentsOf(l.id));
-  const o = occupancy(l.capacity, people.length);
+  const showPeople = store.can('viewResidents', l.siteId);
+  const people = showPeople ? sortResidents(q.residentsOf(l.id)) : [];
+  const o = occupancy(l.capacity, q.residentCount(l.id));
   const d = s ? distanceM(s, l) : null;
   const pct = o.cap ? Math.min(100, Math.round((o.n / o.cap) * 100)) : 0;
   const route = (mode, label, ic) => (s ? `<a class="btn sm" href="${links.kakaoRoute(mode, l, s)}" target="_blank" rel="noopener">${icon(ic)}${label}</a>` : '');
@@ -595,9 +617,10 @@ function lodgingView(l) {
     </article>
 
     <section class="sec">
-      <div class="sec-head"><h3>거주자 <small>${people.length}명</small></h3><span class="spacer"></span>
+      <div class="sec-head"><h3>거주자 <small>${o.n}명</small></h3><span class="spacer"></span>
         ${canEdit(l.siteId) ? `<button type="button" class="btn sm" data-act="add-resident">${icon('plus')}거주자</button>` : ''}</div>
-      ${people.length ? `<ul class="people">${people.map((r) => personRow(r, canEdit(l.siteId))).join('')}</ul>` : `<p class="empty">거주자가 없습니다.${canEdit(l.siteId) ? ' <button type="button" class="link" data-act="add-resident">거주자 등록</button>' : ''}</p>`}
+      ${!showPeople ? `<div class="notice locked">${icon('lock')}<span>거주자 명단과 연락처는 개인정보라 <b>이 현장에 배정된 사람</b>만 볼 수 있어요. 인원 수만 표시합니다.</span></div>`
+        : people.length ? `<ul class="people">${people.map((r) => personRow(r, canEdit(l.siteId))).join('')}</ul>` : `<p class="empty">거주자가 없습니다.${canEdit(l.siteId) ? ' <button type="button" class="link" data-act="add-resident">거주자 등록</button>' : ''}</p>`}
     </section>`;
 }
 
@@ -634,7 +657,7 @@ onAction('edit-resident', (el) => residentDialog(q.resident(el.dataset.id)));
 onAction('del-site', async (el) => {
   const s = q.site(el.dataset.id);
   const ls = q.lodgingsOf(s.id);
-  const rs = ls.reduce((a, l) => a + q.residentsOf(l.id).length, 0);
+  const rs = ls.reduce((a, l) => a + q.residentCount(l.id), 0);
   const ok = await confirmDialog(`"${s.name}" 현장을 삭제할까요?${ls.length ? `\n이 현장의 숙소 ${ls.length}곳과 거주자 ${rs}명 정보도 함께 지워집니다.` : ''}`, { ok: '삭제', danger: true, title: '현장 삭제' });
   if (!ok) return;
   await store.remove('sites', s.id);
@@ -643,7 +666,7 @@ onAction('del-site', async (el) => {
 
 onAction('del-lodging', async (el) => {
   const l = q.lodging(el.dataset.id);
-  const n = q.residentsOf(l.id).length;
+  const n = q.residentCount(l.id);
   const ok = await confirmDialog(`"${l.name}" 숙소를 삭제할까요?${n ? `\n거주자 ${n}명 정보도 함께 지워집니다.` : ''}`, { ok: '삭제', danger: true, title: '숙소 삭제' });
   if (!ok) return;
   await store.remove('lodgings', l.id);
@@ -759,7 +782,7 @@ function renderAlertCount() {
 onAction('alerts', () => {
   const list = leaseAlerts();
   const row = ({ l, st }) => `<li><button type="button" class="row-btn" data-act="alert-go" data-id="${esc(l.id)}">
-      <span><b>${esc(l.name)}</b><small>${esc(q.site(l.siteId)?.name || '')} · 계약 종료 ${fmtDate(l.leaseEnd)} · 거주 ${q.residentsOf(l.id).length}명</small></span>
+      <span><b>${esc(l.name)}</b><small>${esc(q.site(l.siteId)?.name || '')} · 계약 종료 ${fmtDate(l.leaseEnd)} · 거주 ${q.residentCount(l.id)}명</small></span>
       ${leaseBadge(l.leaseEnd)}</button></li>`;
   const expired = list.filter((x) => x.st.level === 'expired');
   const soon = list.filter((x) => x.st.level === 'soon');

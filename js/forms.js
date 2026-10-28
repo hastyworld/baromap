@@ -210,7 +210,7 @@ export function lodgingDialog(rec = null, preset = {}) {
   // 공유 모드에서는 수정 권한이 있는 현장만 고를 수 있다.
   const editable = state.data.sites.filter((s) => store.can('edit', s.id));
   if (!editable.length) {
-    toast('숙소를 등록할 수 있는 현장이 없습니다. 관리자에게 현장 담당 권한을 요청하세요.', 'warn');
+    toast('숙소를 등록할 수 있는 현장이 없습니다. 운영자에게 현장 담당 권한을 요청하세요.', 'warn');
     return;
   }
   const siteOpts = [...editable].sort((a, b) => a.name.localeCompare(b.name, 'ko'))
@@ -252,7 +252,7 @@ export function residentDialog(rec = null, preset = {}) {
     return `<optgroup label="${esc(s.name)}">${ls.map((l) => `<option value="${esc(l.id)}" ${l.id === r.lodgingId ? 'selected' : ''}>${esc(l.name)} (${q.residentsOf(l.id).length}${l.capacity ? `/${l.capacity}` : ''}명)</option>`).join('')}</optgroup>`;
   }).join('');
   if (!groups) {
-    toast('거주자를 등록할 수 있는 숙소가 없습니다. 관리자에게 현장 담당 권한을 요청하세요.', 'warn');
+    toast('거주자를 등록할 수 있는 숙소가 없습니다. 운영자에게 현장 담당 권한을 요청하세요.', 'warn');
     return;
   }
   openModal({

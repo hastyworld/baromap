@@ -3,13 +3,13 @@
 // - 버전이 고정된 CDN 파일(Leaflet·SheetJS·Supabase·글꼴)은 "보관본 먼저"
 // - 데이터(Supabase)·지도 타일·카카오 API는 건드리지 않는다
 // 화면 파일을 추가·삭제하면 SHELL과 VERSION을 함께 고친다.
-const VERSION = 'baromap-0.3.2';
+const VERSION = 'baromap-0.4.0';
 const SHELL = [
   './', 'index.html', 'config.js', 'manifest.webmanifest', 'favicon.svg',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
   'css/app.css',
   'js/app.js', 'js/ctx.js', 'js/store.js', 'js/store-remote.js', 'js/model.js', 'js/sample.js', 'js/util.js',
-  'js/geo.js', 'js/forms.js', 'js/excel.js', 'js/excel-ui.js', 'js/auth-ui.js', 'js/admin-ui.js', 'js/pwa.js', 'js/photos.js',
+  'js/geo.js', 'js/forms.js', 'js/excel.js', 'js/excel-ui.js', 'js/auth-ui.js', 'js/admin-ui.js', 'js/pwa.js', 'js/photos.js', 'js/progress.js', 'js/model3d.js', 'js/dxf.js',
   'js/map/index.js', 'js/map/base.js', 'js/map/kakao.js', 'js/map/osm.js',
 ];
 const CDN = /^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//;

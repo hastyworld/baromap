@@ -31,7 +31,8 @@ export async function initStore() {
   return store;
 }
 
-export const ROLE_LABEL = { pending: '승인 대기', viewer: '조회', manager: '현장 담당', admin: '관리자' };
+// DB의 권한 값 → 화면 이름. admin은 "운영자", supervisor는 "관리자"(모든 현장 현황, 거주자 정보는 못 봄)
+export const ROLE_LABEL = { pending: '승인 대기', viewer: '조회', manager: '현장 담당', supervisor: '관리자', admin: '운영자' };
 
 export const state = {
   data: { sites: [], lodgings: [], residents: [] },
@@ -53,6 +54,12 @@ export const q = {
   resident: (id) => state.data.residents.find((r) => r.id === id),
   lodgingsOf: (siteId) => state.data.lodgings.filter((l) => l.siteId === siteId),
   residentsOf: (lodgingId) => state.data.residents.filter((r) => r.lodgingId === lodgingId),
+  // 거주 인원 수: 거주자를 볼 수 있으면 실제 명단으로, 아니면(관리자) 서버가 준 숫자로
+  residentCount(lodgingId) {
+    const l = q.lodging(lodgingId);
+    if (!l || store.can('viewResidents', l.siteId)) return q.residentsOf(lodgingId).length;
+    return state.data.counts?.[lodgingId] ?? 0;
+  },
 };
 
 // app.js가 채워 넣는 화면 함수(모듈 간 순환 참조를 피하기 위함)

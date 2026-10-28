@@ -2,6 +2,8 @@
 // 지금은 브라우저(localStorage)에 저장한다. v1.0에서 서버 저장으로 바꿀 때는
 // 이 파일 안쪽(load/save/remove/importJson/clear)만 서버 API 호출로 바꾸면 된다. 함수는 이미 비동기다.
 
+import { nextCell } from './model.js';
+
 export const KINDS = { sites: '현장', lodgings: '숙소', residents: '거주자' };
 
 // 기획안 "데이터 구조"의 필드 이름 그대로
@@ -14,6 +16,7 @@ export const FIELDS = {
 export const LODGING_TYPES = ['아파트', '오피스텔', '원룸', '빌라', '주택', '기숙사', '숙박업소', '기타'];
 
 const STORAGE_KEY = 'baromap.data.v1';
+const PROGRESS_KEY = 'baromap.progress.v1';
 const FORMAT = 'baromap-v1';
 
 export class ValidationError extends Error {}
@@ -113,13 +116,104 @@ export function validate(kind, input, data) {
       height: int(b.height, '사진 높이', 1, 20000),
     };
   }
+  // 골구도의 동: 라인마다 층 범위(시작층~최고층)
+  if (kind === 'siteBuildings') {
+    const siteId = str(b.siteId, 40);
+    if (!siteId || !data.sites.some((s) => s.id === siteId)) fail('동을 만들 현장을 선택해주세요.');
+    const lines = Array.isArray(b.lines) ? b.lines : [];
+    if (!lines.length) fail('라인을 하나 이상 넣어주세요.');
+    if (lines.length > 30) fail('라인은 30개까지 넣을 수 있습니다.');
+    const seen = new Set();
+    const clean = lines.map((ln, i) => {
+      const name = str(ln?.name, 10).replace(/호$/, '');
+      if (!name) fail(`${i + 1}번째 라인 이름을 입력해주세요.`);
+      if (seen.has(name)) fail(`라인 이름 "${name}"이(가) 겹칩니다.`);
+      seen.add(name);
+      const from = int(ln?.from, `${name}호 라인 시작층`, 1, 99) ?? 1;
+      const to = int(ln?.to, `${name}호 라인 최고층`, 1, 99);
+      if (to == null) fail(`${name}호 라인의 최고층을 입력해주세요.`);
+      if (to < from) fail(`${name}호 라인의 최고층이 시작층보다 낮습니다.`);
+      return { name, from, to };
+    });
+    return { siteId, name: required(str(b.name, 30), '동 이름'), sort: int(b.sort, '순서', -9999, 9999) ?? 0, lines: clean };
+  }
+  // 공종 시트: 순서대로 진행하는 공종(1번부터)과 색
+  if (kind === 'progressSheets') {
+    const siteId = str(b.siteId, 40);
+    if (!siteId || !data.sites.some((s) => s.id === siteId)) fail('시트를 만들 현장을 선택해주세요.');
+    const trades = (Array.isArray(b.trades) ? b.trades : []).filter((t) => str(t?.name, 30));
+    if (!trades.length) fail('공종을 하나 이상 넣어주세요.');
+    if (trades.length > 40) fail('공종은 시트 하나에 40개까지 넣을 수 있습니다.');
+    return {
+      siteId,
+      name: required(str(b.name, 30), '시트 이름'),
+      sort: int(b.sort, '순서', -9999, 9999) ?? 0,
+      trades: trades.map((t) => {
+        const color = String(t.color || '').trim();
+        if (!/^#[0-9a-f]{6}$/i.test(color)) fail(`"${str(t.name, 30)}" 공종의 색이 올바르지 않습니다.`);
+        return { name: str(t.name, 30), color: color.toUpperCase() };
+      }),
+    };
+  }
+  // 도면에서 만든 3D 모델 정보(모양 데이터는 저장소가 따로 보관)
+  if (kind === 'siteModels') {
+    const siteId = str(b.siteId, 40);
+    if (!siteId || !data.sites.some((s) => s.id === siteId)) fail('모델을 만들 현장을 선택해주세요.');
+    const kindV = b.kind === 'unit' ? 'unit' : 'building';
+    const h = Number(b.floorHeight ?? 2.9);
+    if (!Number.isFinite(h) || h < 2 || h > 10) fail('층고는 2~10m 사이로 입력해주세요.');
+    const thumb = b.thumb == null ? '' : String(b.thumb);
+    if (thumb && (!/^data:image\/(jpeg|png|webp);base64,/.test(thumb) || thumb.length > 200000)) fail('미리보기 이미지가 올바르지 않습니다.');
+    const stats = b.stats && typeof b.stats === 'object' ? b.stats : {};
+    if (JSON.stringify(stats).length > 5000) fail('모델 정보가 너무 큽니다.');
+    return {
+      siteId,
+      kind: kindV,
+      name: required(str(b.name, 30), '모델 이름'),
+      buildingId: str(b.buildingId, 40) || null,
+      floors: kindV === 'unit' ? 1 : int(b.floors, '층수', 1, 99) ?? 1,
+      floorHeight: Math.round(h * 100) / 100,
+      thumb,
+      stats,
+    };
+  }
   throw new Error(`알 수 없는 종류: ${kind}`);
+}
+
+// 3D 모양 데이터(dxf.js packGeometry 결과) 확인
+export function validateGeometry(g) {
+  const ok = g && g.v === 1 && Array.isArray(g.walls) && Array.isArray(g.glass) && Array.isArray(g.solids) && Array.isArray(g.floor);
+  if (!ok) fail('3D 모델 데이터가 올바르지 않습니다.');
+  if (!g.walls.length && !g.solids.length) fail('벽·기둥으로 세울 선이 없습니다. 벽·기둥 레이어를 골라주세요.');
+  const json = JSON.stringify(g);
+  if (json.length > 15 * 1024 * 1024) fail('도면 선이 너무 많아 저장할 수 없습니다. 벽·기둥 레이어만 골라주세요.');
+  return json;
+}
+
+// 골구도 칸 입력 검증: 그 동에 있는 세대인지, 그 시트에 있는 공종 번호인지
+// changes: [{ buildingId, unit, step }] → 같은 형태로 돌려준다. date는 작업일(빈 값 허용)
+export function validateCells(sheet, buildings, changes, date) {
+  if (!sheet) fail('공종 시트를 찾을 수 없습니다.');
+  const workDate = date ? (() => { const d = String(date).trim(); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) fail('작업일은 2026-03-02 같은 형식으로 입력해주세요.'); return d; })() : '';
+  const max = sheet.trades.length;
+  const out = (changes || []).map((c) => {
+    const b = buildings.find((x) => x.id === c.buildingId);
+    if (!b) fail('동을 찾을 수 없습니다. 화면을 새로 고쳐주세요.');
+    const m = /^(-?\d{1,2}):(.{1,10})$/.exec(String(c.unit || ''));
+    const ln = m && b.lines.find((l) => l.name === m[2]);
+    if (!ln || Number(m[1]) < ln.from || Number(m[1]) > ln.to) fail(`${b.name}에 없는 세대입니다.`);
+    const step = Number(c.step);
+    if (!Number.isInteger(step) || step < 0 || step > max) fail(`공종 번호는 0~${max} 사이로 입력해주세요.`);
+    return { buildingId: b.id, unit: c.unit, step };
+  });
+  if (!out.length) fail('세대를 먼저 골라주세요.');
+  return { changes: out, date: workDate };
 }
 
 // ---------------------------------------------------------------- 저장소
 
 const empty = () => ({ format: FORMAT, sample: false, sites: [], lodgings: [], residents: [] });
-const ID_PREFIX = { sites: 's_', lodgings: 'l_', residents: 'r_', sitePhotos: 'p_' };
+const ID_PREFIX = { sites: 's_', lodgings: 'l_', residents: 'r_', sitePhotos: 'p_', siteBuildings: 'b_', progressSheets: 'h_', siteModels: 'm_' };
 export const newId = (kind) => `${ID_PREFIX[kind] || 'x_'}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 export const clone = (x) => JSON.parse(JSON.stringify(x));
 
@@ -128,8 +222,40 @@ export const byTaken = (a, b) => (b.takenAt ? 1 : 0) - (a.takenAt ? 1 : 0)
   || String(b.takenAt || '').localeCompare(String(a.takenAt || ''))
   || String(b.createdAt || '').localeCompare(String(a.createdAt || ''));
 
+// ---------------------------------------------------------------- 공정 현황(골구도) 공통
+
+const bySort = (a, b) => (a.sort || 0) - (b.sort || 0) || String(a.name).localeCompare(String(b.name), 'ko', { numeric: true });
+
+// 현장 하나의 공정 현황: { buildings, sheets, cells: { [sheetId]: { [buildingId]: { [unit]: { step, dates, updatedAt } } } } }
+export function progressCache(buildings, sheets, rows) {
+  const cells = {};
+  for (const r of rows) ((cells[r.sheetId] ||= {})[r.buildingId] ||= {})[r.unit] = { step: r.step, dates: r.dates || {}, updatedAt: r.updatedAt };
+  return { buildings: [...buildings].sort(bySort), sheets: [...sheets].sort(bySort), cells };
+}
+
+// 칸 입력을 저장할 행(올릴 것·지울 것)으로 바꾼다. 같은 값이면 건너뛴다.
+export function cellWrites(cache, sheetId, siteId, changes, date) {
+  const upserts = [];
+  const deletes = [];
+  for (const c of changes) {
+    const prev = cache.cells[sheetId]?.[c.buildingId]?.[c.unit];
+    const next = nextCell(prev, c.step, date);
+    if (c.step === 0) {
+      if (prev) deletes.push({ buildingId: c.buildingId, unit: c.unit });
+    } else if (!prev || prev.step !== next.step || JSON.stringify(prev.dates) !== JSON.stringify(next.dates)) {
+      upserts.push({ sheetId, buildingId: c.buildingId, unit: c.unit, siteId, step: next.step, dates: next.dates });
+    }
+  }
+  return { upserts, deletes };
+}
+
+export function applyCellWrites(cache, sheetId, { upserts, deletes }, stamp) {
+  for (const r of upserts) ((cache.cells[sheetId] ||= {})[r.buildingId] ||= {})[r.unit] = { step: r.step, dates: r.dates, updatedAt: stamp };
+  for (const d of deletes) delete cache.cells[sheetId]?.[d.buildingId]?.[d.unit];
+}
+
 // ---------------------------------------------------------------- 현장 사진 보관 (브라우저 저장 모드)
-// 사진 원본은 커서 localStorage 대신 IndexedDB에 둔다. IndexedDB가 없으면(Node 테스트) 메모리.
+// 사진 원본·3D 모양 데이터는 커서 localStorage 대신 IndexedDB에 둔다. IndexedDB가 없으면(Node 테스트) 메모리.
 
 export function memoryPhotoBackend() {
   const m = new Map();
@@ -141,22 +267,22 @@ export function memoryPhotoBackend() {
   };
 }
 
-function idbPhotoBackend() {
+function idbBackend(dbName, storeName) {
   let opened = null;
   const open = () => (opened ||= new Promise((resolve, reject) => {
-    const req = indexedDB.open('baromap-photos', 1);
-    req.onupgradeneeded = () => req.result.createObjectStore('photos', { keyPath: 'id' });
+    const req = indexedDB.open(dbName, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(storeName, { keyPath: 'id' });
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   }));
   const run = async (mode, fn) => {
     const db = await open();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction('photos', mode);
-      const req = fn(tx.objectStore('photos'));
+      const tx = db.transaction(storeName, mode);
+      const req = fn(tx.objectStore(storeName));
       tx.oncomplete = () => resolve(req?.result);
       tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error || new Error('사진 보관소 오류'));
+      tx.onabort = () => reject(tx.error || new Error('브라우저 보관소 오류'));
     });
   };
   return {
@@ -203,13 +329,15 @@ export async function openStore(cfg = {}, opts = {}) {
 }
 
 /**
- * @param {{ storage?: Storage, now?: () => Date, photoBackend?: ReturnType<typeof memoryPhotoBackend> }} [opts]
+ * @param {{ storage?: Storage, now?: () => Date, photoBackend?: ReturnType<typeof memoryPhotoBackend>, modelBackend?: ReturnType<typeof memoryPhotoBackend> }} [opts]
  */
-export function createStore({ storage = globalThis.localStorage, now = () => new Date(), photoBackend } = {}) {
+export function createStore({ storage = globalThis.localStorage, now = () => new Date(), photoBackend, modelBackend } = {}) {
   let data = empty();
   const listeners = new Set();
-  const photoDb = photoBackend || (globalThis.indexedDB ? idbPhotoBackend() : memoryPhotoBackend());
+  const photoDb = photoBackend || (globalThis.indexedDB ? idbBackend('baromap-photos', 'photos') : memoryPhotoBackend());
   const photoCache = new Map(); // siteId → 사진 정보 목록(원본 제외)
+  const modelDb = modelBackend || (globalThis.indexedDB ? idbBackend('baromap-models', 'models') : memoryPhotoBackend());
+  const modelCache = new Map(); // siteId → 3D 모델 정보 목록(모양 데이터 제외)
 
   const notify = () => { for (const fn of listeners) fn(); };
 
@@ -222,15 +350,68 @@ export function createStore({ storage = globalThis.localStorage, now = () => new
     notify();
   }
 
-  // 현장이 없어진 사진(현장 삭제·전체 삭제·파일 가져오기 뒤)은 원본까지 지운다.
-  async function prunePhotos() {
+  // 공정 현황(골구도)은 따로 보관한다: { buildings: [], sheets: [], cells: [{ sheetId, buildingId, unit, siteId, step, dates }] }
+  let prog = null;
+  const progCache = new Map(); // siteId → progressCache(...)
+  function progData() {
+    if (!prog) {
+      try { prog = JSON.parse(storage.getItem(PROGRESS_KEY)); } catch { prog = null; }
+      if (!prog || !Array.isArray(prog.buildings) || !Array.isArray(prog.sheets) || !Array.isArray(prog.cells)) prog = { buildings: [], sheets: [], cells: [] };
+    }
+    return prog;
+  }
+  function progSave(next = prog) {
+    prog = next || { buildings: [], sheets: [], cells: [] };
     try {
-      const live = new Set(data.sites.map((s) => s.id));
-      const all = await photoDb.all();
-      const gone = all.filter((p) => !live.has(p.siteId)).map((p) => p.id);
-      if (gone.length) await photoDb.del(gone);
-      for (const id of photoCache.keys()) if (!live.has(id)) photoCache.delete(id);
-    } catch { /* 정리 실패는 다음에 다시 시도된다 */ }
+      storage.setItem(PROGRESS_KEY, JSON.stringify(prog));
+    } catch {
+      throw new Error('브라우저 저장 공간이 부족해 공정 현황을 저장하지 못했습니다.');
+    }
+    progCache.clear();
+    notify();
+  }
+  const progSite = (siteId) => {
+    if (!progCache.has(siteId)) {
+      const p = progData();
+      progCache.set(siteId, progressCache(p.buildings.filter((b) => b.siteId === siteId), p.sheets.filter((h) => h.siteId === siteId), p.cells.filter((c) => c.siteId === siteId)));
+    }
+    return progCache.get(siteId);
+  };
+
+  // 현장이 없어진 사진(원본까지)·공정 현황은 지운다(현장 삭제·전체 삭제·파일 가져오기 뒤).
+  async function pruneOrphans() {
+    const live = new Set(data.sites.map((s) => s.id));
+    const p = progData();
+    if ([...p.buildings, ...p.sheets, ...p.cells].some((x) => !live.has(x.siteId))) {
+      progSave({ buildings: p.buildings.filter((x) => live.has(x.siteId)), sheets: p.sheets.filter((x) => live.has(x.siteId)), cells: p.cells.filter((x) => live.has(x.siteId)) });
+    }
+    for (const [db, cache] of [[photoDb, photoCache], [modelDb, modelCache]]) {
+      try {
+        const all = await db.all();
+        const gone = all.filter((x) => !live.has(x.siteId)).map((x) => x.id);
+        if (gone.length) await db.del(gone);
+        for (const id of cache.keys()) if (!live.has(id)) cache.delete(id);
+      } catch { /* 정리 실패는 다음에 다시 시도된다 */ }
+    }
+  }
+
+  // 동·공종 시트 저장(새로 만들기·고치기)
+  function saveProgressMeta(list, kind, input) {
+    const clean = validate(kind, input, data);
+    const p = progData();
+    const stamp = now().toISOString();
+    const items = p[list];
+    const i = input.id ? items.findIndex((x) => x.id === input.id) : -1;
+    const rec = i >= 0 ? { ...items[i], ...clean, updatedAt: stamp } : { id: newId(kind), ...clean, createdAt: stamp, updatedAt: stamp };
+    progSave({ ...p, [list]: i >= 0 ? items.map((x, j) => (j === i ? rec : x)) : [...items, rec] });
+    return clone(rec);
+  }
+
+  // 예시 데이터에 공정 현황이 있으면 함께 넣는다
+  function useSample(sample) {
+    data = normalize({ ...sample, sample: true });
+    persist();
+    if (sample.progress) progSave(clone(sample.progress));
   }
 
   const normalize = (obj) => normalizeData(obj, now().toISOString());
@@ -259,8 +440,11 @@ export function createStore({ storage = globalThis.localStorage, now = () => new
           console.warn('[store] 저장된 데이터를 읽지 못했습니다.', err);
         }
       }
-      data = sampleFactory ? normalize({ ...sampleFactory(now()), sample: true }) : empty();
-      persist();
+      if (sampleFactory) useSample(sampleFactory(now()));
+      else {
+        data = empty();
+        persist();
+      }
       return store.snapshot();
     },
 
@@ -316,7 +500,7 @@ export function createStore({ storage = globalThis.localStorage, now = () => new
         removed.residents = rb - data.residents.length;
       }
       persist();
-      if (siteIds.length) await prunePhotos();
+      if (siteIds.length) await pruneOrphans();
       return removed;
     },
 
@@ -329,20 +513,94 @@ export function createStore({ storage = globalThis.localStorage, now = () => new
       if (obj?.format && obj.format !== FORMAT) fail('다른 형식의 파일입니다. 바로맵에서 내보낸 JSON 파일을 선택해주세요.');
       data = normalize({ ...obj, sample: false });
       persist();
-      await prunePhotos();
+      await pruneOrphans();
       return { sites: data.sites.length, lodgings: data.lodgings.length, residents: data.residents.length };
     },
 
     async clear() {
       data = empty();
       persist();
-      await prunePhotos();
+      await pruneOrphans();
     },
 
     async resetSample(sampleFactory) {
-      data = normalize({ ...sampleFactory(now()), sample: true });
-      persist();
-      await prunePhotos();
+      progSave({ buildings: [], sheets: [], cells: [] });
+      useSample(sampleFactory(now()));
+      await pruneOrphans();
+    },
+
+    // 공정 현황(골구도). 브라우저 저장 모드는 바로 읽을 수 있어 load()가 따로 필요 없다.
+    progress: {
+      cached: (siteId) => clone(progSite(siteId)),
+      async load(siteId) { return clone(progSite(siteId)); },
+
+      async saveBuilding(input) { return saveProgressMeta('buildings', 'siteBuildings', input); },
+      async saveSheet(input) { return saveProgressMeta('sheets', 'progressSheets', input); },
+
+      async removeBuilding(id) {
+        const p = progData();
+        progSave({ ...p, buildings: p.buildings.filter((b) => b.id !== id), cells: p.cells.filter((c) => c.buildingId !== id) });
+      },
+      async removeSheet(id) {
+        const p = progData();
+        progSave({ ...p, sheets: p.sheets.filter((h) => h.id !== id), cells: p.cells.filter((c) => c.sheetId !== id) });
+      },
+
+      // changes: [{ buildingId, unit, step }] — step 0은 지우기. date는 작업일.
+      async setCells(sheetId, changes, date) {
+        const p = progData();
+        const sheet = p.sheets.find((h) => h.id === sheetId);
+        const cache = progSite(sheet?.siteId);
+        const v = validateCells(sheet, cache.buildings, changes, date);
+        const w = cellWrites(cache, sheetId, sheet.siteId, v.changes, v.date);
+        if (!w.upserts.length && !w.deletes.length) return 0;
+        const stamp = now().toISOString();
+        const key = (c) => `${c.sheetId}|${c.buildingId}|${c.unit}`;
+        const drop = new Set([...w.upserts, ...w.deletes.map((d) => ({ ...d, sheetId }))].map(key));
+        progSave({ ...p, cells: [...p.cells.filter((c) => !drop.has(key(c))), ...w.upserts.map((r) => ({ ...r, updatedAt: stamp }))] });
+        return w.upserts.length + w.deletes.length;
+      },
+    },
+
+    // 도면에서 만든 3D 모델. 목록은 list(), 모양 데이터는 볼 때 geometry()로 읽는다.
+    models: {
+      cached: (siteId) => (modelCache.has(siteId) ? clone(modelCache.get(siteId)) : undefined),
+
+      async list(siteId) {
+        const all = await modelDb.all();
+        const list = all.filter((x) => x.siteId === siteId).map(({ geometry, ...m }) => m).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+        modelCache.set(siteId, list);
+        notify();
+        return clone(list);
+      },
+
+      // input: { siteId, kind, name, buildingId, floors, floorHeight, thumb, stats, geometry }
+      async add(input) {
+        const clean = validate('siteModels', input, data);
+        validateGeometry(input.geometry);
+        const stamp = now().toISOString();
+        const rec = { id: newId('siteModels'), ...clean, createdAt: stamp, updatedAt: stamp };
+        try {
+          await modelDb.put({ ...rec, geometry: input.geometry });
+        } catch {
+          throw new Error('브라우저 저장 공간이 부족해 3D 모델을 저장하지 못했습니다.');
+        }
+        modelCache.set(clean.siteId, [...(modelCache.get(clean.siteId) || []), rec]);
+        notify();
+        return clone(rec);
+      },
+
+      async remove(id) {
+        await modelDb.del([id]);
+        for (const [siteId, list] of modelCache) modelCache.set(siteId, list.filter((m) => m.id !== id));
+        notify();
+      },
+
+      async geometry(model) {
+        const rec = await modelDb.get(model.id);
+        if (!rec?.geometry) throw new Error('3D 모델 데이터를 찾지 못했습니다.');
+        return rec.geometry;
+      },
     },
 
     // 현장 360° 사진. 목록은 현장을 열 때 list()로 받아 두고, 화면은 cached()로 읽는다.

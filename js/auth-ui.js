@@ -49,7 +49,7 @@ function loginForm(mode = 'login', notice = '') {
       <label class="field"><span>비밀번호</span><input name="password" type="password" required minlength="6" autocomplete="${mode === 'signup' ? 'new-password' : 'current-password'}"></label>
       <button type="submit" class="btn primary block">${mode === 'signup' ? '가입하기' : '로그인'}</button>
     </form>
-    ${mode === 'login' ? '<button type="button" class="link" data-act="auth-mode" data-mode="reset">비밀번호를 잊으셨나요?</button>' : '<p class="muted small">가입하면 관리자가 승인한 뒤부터 볼 수 있습니다. (첫 가입자는 자동으로 관리자)</p>'}
+    ${mode === 'login' ? '<button type="button" class="link" data-act="auth-mode" data-mode="reset">비밀번호를 잊으셨나요?</button>' : '<p class="muted small">가입하면 운영자가 승인한 뒤부터 볼 수 있습니다. (첫 가입자는 자동으로 운영자)</p>'}
     ${providers.length ? `<div class="auth-or"><span>또는</span></div>${providers.map((p) => `<button type="button" class="btn block" data-act="auth-provider" data-provider="${p}">${esc(PROVIDER_LABEL[p])}</button>`).join('')}` : ''}`);
 }
 
@@ -88,8 +88,8 @@ function showPending() {
     const me = store.me;
     screen(`<div class="pending">
         ${icon('clock')}
-        <h2>관리자 승인을 기다리고 있습니다</h2>
-        <p class="muted"><b>${esc(me?.email || '')}</b> 계정으로 가입되었습니다.<br>관리자가 권한을 주면 이 화면이 자동으로 바뀝니다.</p>
+        <h2>운영자 승인을 기다리고 있습니다</h2>
+        <p class="muted"><b>${esc(me?.email || '')}</b> 계정으로 가입되었습니다.<br>운영자가 권한을 주면 이 화면이 자동으로 바뀝니다.</p>
       </div>
       <button type="button" class="btn block" data-act="auth-logout">로그아웃</button>`);
     const off = store.subscribe(() => {
@@ -155,7 +155,7 @@ export function accountDialog() {
     title: '내 계정',
     body: `<form id="f-account" data-form="account">
       <p class="account-head"><span class="avatar">${esc((me.name || me.email).slice(0, 1))}</span>
-        <span><b>${esc(me.email)}</b><br><span class="muted small">권한: ${ROLE_LABEL[me.role] || me.role}${me.role === 'manager' ? ` · 담당 현장 ${(me.siteIds || []).length}곳` : ''}</span></span></p>
+        <span><b>${esc(me.email)}</b><br><span class="muted small">권한: ${ROLE_LABEL[me.role] || me.role}${['manager', 'viewer'].includes(me.role) ? ` · 배정 현장 ${(me.siteIds || []).length}곳` : ''}</span></span></p>
       <label class="field"><span>이름</span><input name="name" value="${esc(me.name)}" maxlength="50" required></label>
       <label class="field"><span>새 비밀번호 <small class="muted">(바꿀 때만 입력, 6자 이상)</small></span><input name="password" type="password" minlength="6" autocomplete="new-password"></label>
     </form>`,

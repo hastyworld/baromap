@@ -1,5 +1,5 @@
 // 처음 실행 시 보여주는 가상 예시 데이터. 실존 인물·연락처가 아니다(연락처는 개통되지 않는 010-0000 대역).
-import { todayStr } from './model.js';
+import { todayStr, unitKey, TRADE_COLORS, SHEET_PRESETS } from './model.js';
 
 export function sampleData(now = new Date()) {
   const day = (offset) => todayStr(new Date(now.getTime() + offset * 864e5));
@@ -69,5 +69,38 @@ export function sampleData(now = new Date()) {
     memo: '',
   }));
 
-  return { sites, lodgings, residents };
+  return { sites, lodgings, residents, progress: sampleProgress(day) };
+}
+
+// 가상 골구도: 세종 현장 101~103동(라인마다 최고층이 다름)과 골조·세대 마감 공정
+function sampleProgress(day) {
+  const siteId = 's_sjg';
+  const L = (name, to) => ({ name, from: 1, to });
+  const buildings = [
+    { id: 'b_s101', siteId, name: '101동', sort: 1, lines: [L('1', 16), L('2', 16), L('3', 18), L('4', 18)] },
+    { id: 'b_s102', siteId, name: '102동', sort: 2, lines: [L('1', 18), L('2', 18)] },
+    { id: 'b_s103', siteId, name: '103동', sort: 3, lines: [L('1', 11), L('2', 11), L('3', 17), L('4', 17), L('5', 19), L('6', 19)] },
+  ];
+  const sheet = (id, sort, preset) => ({
+    id, siteId, sort, name: SHEET_PRESETS[preset].name,
+    trades: SHEET_PRESETS[preset].trades.map((name, i) => ({ name, color: TRADE_COLORS[i % TRADE_COLORS.length] })),
+  });
+  const sheets = [sheet('h_s1', 1, 0), sheet('h_s2', 2, 1)];
+  // 골조는 동마다 올라간 층까지, 세대 마감은 아래층일수록 많이 진행된 모습
+  const frameTop = { b_s101: 99, b_s102: 14, b_s103: 11 };
+  const finishBase = { b_s101: 8, b_s102: 6, b_s103: 4 };
+  const cells = [];
+  for (const b of buildings) {
+    for (const ln of b.lines) {
+      for (let f = ln.from; f <= ln.to; f++) {
+        const top = Math.min(frameTop[b.id], ln.to);
+        const frame = f <= top - 2 ? 5 : f === top - 1 ? 4 : f === top ? 2 : 0;
+        const finish = frame === 5 ? Math.max(0, finishBase[b.id] - Math.floor((f - 1) / 2) - (Number(ln.name) > 2 ? 1 : 0)) : 0;
+        const unit = unitKey(f, ln.name);
+        if (frame) cells.push({ sheetId: 'h_s1', buildingId: b.id, unit, siteId, step: frame, dates: { [frame]: day(-90 + f * 4) } });
+        if (finish) cells.push({ sheetId: 'h_s2', buildingId: b.id, unit, siteId, step: finish, dates: { [finish]: day(-30 + f * 2) } });
+      }
+    }
+  }
+  return { buildings, sheets, cells };
 }
