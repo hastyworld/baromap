@@ -122,6 +122,7 @@ onAction('postcode', async () => {
   new window.daum.Postcode({
     oncomplete: (data) => {
       const addr = data.roadAddress || data.jibunAddress || data.address;
+      state.lastPostcode = { bcode: data.bcode || '', jibun: data.jibunAddress || data.autoJibunAddress || '', address: addr };
       box.hidden = true;
       box.innerHTML = '';
       $('#f-addr').value = addr;

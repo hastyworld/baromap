@@ -46,6 +46,7 @@ export const state = {
   temp: null, // 대화상자에서 고른 위치 { lat, lng, kind }
   picking: null, // 지도에서 위치 지정 중 { kind, onPick }
   flashResident: null,
+  lastPostcode: null, // 우편번호 찾기로 고른 주소의 법정동코드·지번(공공 정보 필지 찾기에 씀) { bcode, jibun, address }
 };
 
 export const q = {

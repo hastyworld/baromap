@@ -31,7 +31,7 @@ const cell = (v) => (v == null ? '' : String(v).trim());
 
 // 엑셀 날짜 칸은 일련번호(1900년 기준 일수)로 들어온다. 시간대 영향 없이 날짜로 바꾼다.
 const DATE_KEYS = new Set(['startDate', 'endDate', 'leaseEnd', 'moveIn']);
-function excelDate(v) {
+export function excelDate(v) {
   if (v instanceof Date && !Number.isNaN(v.getTime())) {
     const p = (n) => String(n).padStart(2, '0');
     return `${v.getFullYear()}-${p(v.getMonth() + 1)}-${p(v.getDate())}`;

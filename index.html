@@ -19,6 +19,7 @@
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
   <link rel="stylesheet" href="css/app.css">
+  <link rel="stylesheet" href="css/ops.css">
   <script src="config.js"></script>
   <script type="module" src="js/app.js"></script>
 </head>
@@ -34,7 +35,7 @@
       <input id="q" type="search" placeholder="직원 이름·숙소·현장 검색" autocomplete="off" aria-label="직원 이름, 숙소, 현장 검색" aria-controls="q-results" aria-expanded="false">
       <div id="q-results" class="q-results" role="listbox" hidden></div>
     </div>
-    <button type="button" class="icon-btn top-btn" data-act="alerts" aria-label="계약 만료 알림" title="계약 만료 알림">
+    <button type="button" class="icon-btn top-btn" data-act="notices" aria-label="알림" title="알림">
       <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15zM10 20.5a2 2 0 0 0 4 0"/></svg>
       <span class="count" id="alert-count" hidden></span>
     </button>
@@ -46,6 +47,7 @@
     </div>
   </header>
 
+  <div id="notice-bar" role="alert" hidden></div>
   <div id="sample-bar" hidden></div>
   <div id="install-bar" hidden></div>
 

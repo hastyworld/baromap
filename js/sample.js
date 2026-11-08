@@ -1,5 +1,6 @@
 // 처음 실행 시 보여주는 가상 예시 데이터. 실존 인물·연락처가 아니다(연락처는 개통되지 않는 010-0000 대역).
 import { todayStr, unitKey, TRADE_COLORS, SHEET_PRESETS } from './model.js';
+import { sampleOps } from './sample-ops.js';
 
 export function sampleData(now = new Date()) {
   const day = (offset) => todayStr(new Date(now.getTime() + offset * 864e5));
@@ -69,7 +70,7 @@ export function sampleData(now = new Date()) {
     memo: '',
   }));
 
-  return { sites, lodgings, residents, progress: sampleProgress(day) };
+  return { sites, lodgings, residents, progress: sampleProgress(day), ops: sampleOps(day) };
 }
 
 // 가상 골구도: 세종 현장 101~103동(라인마다 최고층이 다름)과 골조·세대 마감 공정
@@ -97,7 +98,8 @@ function sampleProgress(day) {
         const frame = f <= top - 2 ? 5 : f === top - 1 ? 4 : f === top ? 2 : 0;
         const finish = frame === 5 ? Math.max(0, finishBase[b.id] - Math.floor((f - 1) / 2) - (Number(ln.name) > 2 ? 1 : 0)) : 0;
         const unit = unitKey(f, ln.name);
-        if (frame) cells.push({ sheetId: 'h_s1', buildingId: b.id, unit, siteId, step: frame, dates: { [frame]: day(-90 + f * 4) } });
+        // 맨 위층 칸은 오늘 찍은 것으로 둔다(일보의 골구도 자동 제안이 보이게)
+        if (frame) cells.push({ sheetId: 'h_s1', buildingId: b.id, unit, siteId, step: frame, dates: { [frame]: f === top ? day(0) : day(-90 + f * 4) } });
         if (finish) cells.push({ sheetId: 'h_s2', buildingId: b.id, unit, siteId, step: finish, dates: { [finish]: day(-30 + f * 2) } });
       }
     }

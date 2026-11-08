@@ -8,6 +8,14 @@ export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 // ---------------------------------------------------------------- 포맷
 
 export const fmtDate = (s) => (s ? s.slice(0, 10).replaceAll('-', '.') : '-');
+// 저장 시각(ISO, UTC) → 이 기기 시각 "2026-10-31 08:44"
+export const fmtDateTime = (s) => {
+  if (!s) return '';
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return String(s);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
 
 export function fmtDistance(m) {
   if (m == null) return '-';
@@ -76,6 +84,9 @@ const ICONS = {
   camera: '<path d="M3.5 8.5h3.5l1.7-2.5h6.6L17 8.5h3.5v11h-17z"/><circle cx="12" cy="13.5" r="3.6"/>',
   globe: '<circle cx="12" cy="12" r="8.5"/><ellipse cx="12" cy="12" rx="3.7" ry="8.5"/><path d="M3.5 12h17"/>',
   street: '<circle cx="12" cy="4.8" r="2"/><path d="M9.2 21v-6.3H7.6V10a2 2 0 0 1 2-2h4.8a2 2 0 0 1 2 2v4.7h-1.6V21M12 14.7V21"/>',
+  layers: '<path d="m12 3 9 4.8-9 4.8-9-4.8z"/><path d="m3 12.2 9 4.8 9-4.8M3 16.6l9 4.8 9-4.8"/>',
+  cut: '<circle cx="6" cy="6.5" r="2.8"/><circle cx="6" cy="17.5" r="2.8"/><path d="M8.3 8.2 20 19M8.3 15.8 20 5"/>',
+  filter: '<path d="M3.5 5h17l-6.5 7.6V19l-4 2v-8.4z"/>',
 };
 
 export function icon(name, cls = '') {

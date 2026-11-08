@@ -3,6 +3,13 @@
 // 이 파일 안쪽(load/save/remove/importJson/clear)만 서버 API 호출로 바꾸면 된다. 함수는 이미 비동기다.
 
 import { nextCell } from './model.js';
+import { createLocalBim } from './store-bim.js';
+import { createLocalOps } from './store-ops.js';
+import { OPS_KINDS } from './ops/kinds.js';
+import { validateOps } from './ops/rules.js';
+import { ValidationError, fail, str, date, int, coord, required, oneOf, obj, arr, strs, num01, nonneg, siteOf } from './rules-base.js';
+
+export { ValidationError };
 
 export const KINDS = { sites: '현장', lodgings: '숙소', residents: '거주자' };
 
@@ -17,40 +24,8 @@ export const LODGING_TYPES = ['아파트', '오피스텔', '원룸', '빌라', '
 
 const STORAGE_KEY = 'baromap.data.v1';
 const PROGRESS_KEY = 'baromap.progress.v1';
+const OPS_SEED_KEY = 'baromap.ops.seeded';
 const FORMAT = 'baromap-v1';
-
-export class ValidationError extends Error {}
-const fail = (msg) => { throw new ValidationError(msg); };
-
-// ---------------------------------------------------------------- 검증 (v1.0 서버에서도 같은 규칙을 쓴다)
-
-const str = (v, max = 200) => (v == null ? '' : String(v).trim().slice(0, max));
-
-function date(v, label) {
-  if (v == null || v === '') return '';
-  if (v instanceof Date && !Number.isNaN(v.getTime())) return v.toISOString().slice(0, 10);
-  const m = /^(\d{4})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})\s*일?\.?$/.exec(String(v).trim());
-  const iso = m && `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
-  if (!iso || Number.isNaN(Date.parse(iso))) fail(`${label}은(는) 2026-03-02 같은 날짜 형식으로 입력해주세요.`);
-  return iso;
-}
-
-function int(v, label, min, max) {
-  if (v == null || v === '') return null;
-  const n = Number(String(v).replace(/[,\s명]/g, ''));
-  if (!Number.isInteger(n) || n < min || n > max) fail(`${label}은(는) ${min}~${max} 사이의 숫자로 입력해주세요.`);
-  return n;
-}
-
-function coord(v, min, max) {
-  const n = Number(v);
-  if (v == null || v === '' || !Number.isFinite(n) || n < min || n > max) {
-    fail('위치가 지정되지 않았습니다. 주소를 검색하거나 지도에서 위치를 지정해주세요.');
-  }
-  return Math.round(n * 1e7) / 1e7;
-}
-
-const required = (v, label) => v || fail(`${label}을(를) 입력해주세요.`);
 
 export function validate(kind, input, data) {
   const b = input || {};
@@ -151,7 +126,9 @@ export function validate(kind, input, data) {
       trades: trades.map((t) => {
         const color = String(t.color || '').trim();
         if (!/^#[0-9a-f]{6}$/i.test(color)) fail(`"${str(t.name, 30)}" 공종의 색이 올바르지 않습니다.`);
-        return { name: str(t.name, 30), color: color.toUpperCase() };
+        // 3D 공정 연동(06 5절): 이 공종이 만드는 재료(분류 또는 '분류:이름'), 없으면 이름으로 짐작
+        const mats = (Array.isArray(t.mats) ? t.mats : []).map((m) => String(m).trim()).filter((m) => /^[a-z]+(:[^:\s]{1,20})?$/.test(m)).slice(0, 6);
+        return { name: str(t.name, 30), color: color.toUpperCase(), ...(mats.length ? { mats } : {}) };
       }),
     };
   }
@@ -177,7 +154,151 @@ export function validate(kind, input, data) {
       stats,
     };
   }
+  const bim = validateBim(kind, b, data);
+  if (bim) return bim;
+  const ops = validateOps(kind, b, data);
+  if (ops) return ops;
   throw new Error(`알 수 없는 종류: ${kind}`);
+}
+
+// ---------------------------------------------------------------- 건축도서·BIM 검증(store-bim.js가 쓴다)
+
+const SET_STATUS = ['uploading', 'reading', 'analyzing', 'building', 'review', 'ready', 'error'];
+const FILE_STATUS = ['queued', 'reading', 'done', 'error'];
+const SHEET_STATUS = ['read', 'classified', 'extracted', 'error', 'skipped'];
+const JOB_KINDS = ['read_file', 'classify_sheet', 'extract_sheet', 'build_model', 'review_set', 'ai_edit', 'triage_sheet', 'read_doc', 'extract_doc', 'cost_link', 'takeoff', 'ai_daily', 'ai_translate', 'ai_risk', 'ai_rfi', 'ai_forecast', 'ai_supply', 'ai_schedule'];
+const JOB_STATUS = ['queued', 'running', 'done', 'error', 'canceled'];
+const REVIEW_STATUS = ['open', 'ai_running', 'proposed', 'applied', 'rejected'];
+export const SHEET_CATEGORIES = ['site_plan', 'floor_plan', 'unit_plan', 'elevation', 'section', 'facility_plan', 'finish_schedule', 'wall_types', 'window_schedule', 'detail', 'cover_index', 'structure', 'mep', 'landscape', 'roof_plan', 'exterior_finish', 'color_plan', 'civil_plan', 'landscape_plan', 'unknown'];
+
+function validateBim(kind, b, data) {
+  if (kind === 'drawingSets') {
+    return {
+      siteId: siteOf(b, data, '도서를 올릴'),
+      name: required(str(b.name, 60), '도서 이름'),
+      revision: str(b.revision, 20),
+      status: oneOf(b.status, SET_STATUS, '도서 상태', 'uploading'),
+      stats: obj(b.stats, '도서 통계', 50000),
+      note: str(b.note, 1000),
+    };
+  }
+  if (kind === 'drawingFiles') {
+    const size = Number(b.size ?? 0);
+    if (!Number.isFinite(size) || size < 0) fail('파일 크기가 올바르지 않습니다.');
+    return {
+      setId: required(str(b.setId, 40), '도서 묶음'),
+      name: required(str(b.name, 200), '파일 이름'),
+      size: Math.round(size),
+      sha256: str(b.sha256, 80),
+      status: oneOf(b.status, FILE_STATUS, '파일 상태', 'queued'),
+      error: str(b.error, 1000),
+      stats: obj(b.stats, '파일 통계', 50000),
+    };
+  }
+  if (kind === 'drawingSheets') {
+    const siteId = str(data.siteId || b.siteId, 40);
+    const path = (p) => { const s = str(p, 300); if (s && siteId && !s.startsWith(`${siteId}/`)) fail('시트 파일 경로가 올바르지 않습니다.'); return s; };
+    const refs = obj(b.refs, '시트 대상');
+    const roles = obj(b.layerRoles, '레이어 쓰임새', 50000);
+    for (const v of Object.values(roles)) if (typeof v !== 'string' || v.length > 30) fail('레이어 쓰임새 값이 올바르지 않습니다.');
+    return {
+      setId: required(str(b.setId, 40), '도서 묶음'),
+      fileId: str(b.fileId, 40) || null,
+      sheetNo: str(b.sheetNo, 40),
+      title: str(b.title, 200),
+      category: oneOf(b.category, SHEET_CATEGORIES, '도면 종류', 'unknown'),
+      scale: str(b.scale, 20),
+      refs: { buildings: strs(refs.buildings, '동', 100, 30), unitTypes: strs(refs.unitTypes, '세대 타입', 100, 30), floors: strs(refs.floors, '층', 100, 30), facility: str(refs.facility, 60) || null },
+      frame: obj(b.frame, '시트 범위', 1000),
+      meta: obj(b.meta, '시트 정보', 20000),
+      imagePath: path(b.imagePath),
+      digestPath: path(b.digestPath),
+      layerRoles: roles,
+      extracted: obj(b.extracted, '판독 결과', 800000),
+      confidence: num01(b.confidence),
+      status: oneOf(b.status, SHEET_STATUS, '시트 상태', 'read'),
+      notes: str(b.notes, 2000),
+      stats: obj(b.stats, '시트 통계', 20000),
+    };
+  }
+  if (kind === 'analysisJobs') {
+    return { siteId: siteOf(b, data, '작업할'), setId: str(b.setId, 40) || null, kind: oneOf(b.kind, JOB_KINDS, '작업 종류'), target: obj(b.target, '작업 대상', 5000) };
+  }
+  if (kind === 'analysisJobPatch') {
+    const out = {};
+    if ('status' in b) out.status = oneOf(b.status, JOB_STATUS, '작업 상태');
+    if ('progress' in b) out.progress = num01(b.progress);
+    if ('attempts' in b) out.attempts = Math.min(100, Math.max(0, Math.round(Number(b.attempts) || 0)));
+    if ('result' in b) out.result = obj(b.result, '작업 결과', 200000);
+    if ('error' in b) out.error = str(b.error, 2000);
+    if ('model' in b) out.model = str(b.model, 60);
+    for (const k of ['tokensIn', 'tokensOut', 'cacheRead', 'cacheWrite']) if (k in b) out[k] = Math.round(nonneg(b[k]));
+    if ('costUsd' in b) out.costUsd = Math.round(nonneg(b.costUsd) * 10000) / 10000;
+    if ('batchId' in b) out.batchId = str(b.batchId, 100) || null;
+    if ('startedAt' in b) out.startedAt = b.startedAt ? String(b.startedAt) : null;
+    return out;
+  }
+  if (kind === 'bimModels') {
+    const files = obj(b.files, '모델 파일', 60 * 1024 * 1024);
+    if (!files['index.json']) fail('모델 파일(index.json)이 없습니다.');
+    for (const name of Object.keys(files)) if (!/^[\w.-]{1,120}\.json$/.test(name)) fail(`모델 파일 이름이 올바르지 않습니다: ${name}`);
+    return { siteId: siteOf(b, data, '모델을 저장할'), setId: str(b.setId, 40) || null, parentId: str(b.parentId, 40) || null, note: str(b.note, 2000), summary: obj(b.summary, '모델 요약', 20000) };
+  }
+  if (kind === 'bimFindings') {
+    const ev = arr(b.evidence, '근거', 50).map((e) => obj(e, '근거', 4000));
+    return {
+      severity: oneOf(b.severity, ['info', 'warn', 'error'], '심각도'),
+      kind: required(str(b.kind, 80), '검증 종류'),
+      message: required(str(b.message, 2000), '검증 내용'),
+      evidence: ev,
+      elementIds: strs(b.elementIds, '관련 요소', 2000, 80),
+      source: oneOf(b.source, ['rule', 'ai', 'doc', 'public'], '출처', 'rule'),
+    };
+  }
+  if (kind === 'bimModelStats') {
+    const views = arr(b.views, '저장한 보기', 20).map((x) => {
+      const cam = obj(x?.camera, '보기 시점', 500);
+      const v3 = (p) => { if (!Array.isArray(p) || p.length !== 3 || !p.every(Number.isFinite)) fail('보기 시점이 올바르지 않습니다.'); return p; };
+      return { name: required(str(x?.name, 30), '보기 이름'), camera: { pos: v3(cam.pos), target: v3(cam.target) } };
+    });
+    return { ...obj(b, '모델 정보', 20000), views };
+  }
+  if (kind === 'bimFindingStatus') return { status: oneOf(b.status, ['open', 'resolved', 'ignored'], '처리 상태'), note: str(b.note, 500) };
+  if (kind === 'bimReviews') {
+    return {
+      modelId: required(str(b.modelId, 40), '모델 버전'),
+      elementIds: strs(b.elementIds, '고른 요소', 500, 80),
+      location: obj(b.location, '위치', 5000),
+      instruction: required(str(b.instruction, 4000), '수정 지시'),
+      sheetNos: strs(b.sheetNos, '참고 도면', 40, 40),
+      attachments: arr(b.attachments, '추가 자료', 10).map((a) => ({ path: str(a?.path, 300), name: str(a?.name, 200), type: str(a?.type, 100), size: Math.round(nonneg(a?.size)) })),
+      messages: arr(b.messages, '대화', 200).map((m) => ({ role: m?.role === 'ai' ? 'ai' : 'user', text: str(m?.text, 8000), at: str(m?.at, 40) })),
+    };
+  }
+  if (kind === 'bimReviewPatch') {
+    const out = {};
+    if ('status' in b) out.status = oneOf(b.status, REVIEW_STATUS, '수정 요청 상태');
+    if ('proposal' in b) out.proposal = b.proposal == null ? null : obj(b.proposal, '수정안', 500000);
+    if ('messages' in b) out.messages = arr(b.messages, '대화', 200).map((m) => ({ role: m?.role === 'ai' ? 'ai' : 'user', text: str(m?.text, 8000), at: str(m?.at, 40) }));
+    if ('resultModelId' in b) out.resultModelId = str(b.resultModelId, 40) || null;
+    if ('instruction' in b) out.instruction = required(str(b.instruction, 4000), '수정 지시');
+    if ('attachments' in b) out.attachments = arr(b.attachments, '추가 자료', 10);
+    if ('sheetNos' in b) out.sheetNos = strs(b.sheetNos, '참고 도면', 40, 40);
+    return out;
+  }
+  if (kind === 'aiSettings') {
+    const out = {};
+    if ('enabled' in b) out.enabled = b.enabled === true;
+    if ('keepOriginals' in b) out.keepOriginals = b.keepOriginals === true;
+    if ('monthlyBudgetUsd' in b) {
+      const n = Number(b.monthlyBudgetUsd);
+      if (!Number.isFinite(n) || n < 0 || n > 100000) fail('한 달 예산은 0~100000 달러 사이로 입력해주세요.');
+      out.monthlyBudgetUsd = Math.round(n * 100) / 100;
+    }
+    if ('model' in b) out.model = required(str(b.model, 60), 'AI 모델');
+    return out;
+  }
+  return null;
 }
 
 // 3D 모양 데이터(dxf.js packGeometry 결과) 확인
@@ -213,8 +334,11 @@ export function validateCells(sheet, buildings, changes, date) {
 // ---------------------------------------------------------------- 저장소
 
 const empty = () => ({ format: FORMAT, sample: false, sites: [], lodgings: [], residents: [] });
-const ID_PREFIX = { sites: 's_', lodgings: 'l_', residents: 'r_', sitePhotos: 'p_', siteBuildings: 'b_', progressSheets: 'h_', siteModels: 'm_' };
-export const newId = (kind) => `${ID_PREFIX[kind] || 'x_'}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+const ID_PREFIX = {
+  sites: 's_', lodgings: 'l_', residents: 'r_', sitePhotos: 'p_', siteBuildings: 'b_', progressSheets: 'h_', siteModels: 'm_',
+  drawingSets: 'ds_', drawingFiles: 'df_', drawingSheets: 'sh_', analysisJobs: 'jb_', bimModels: 'bm_', bimFindings: 'bf_', bimReviews: 'rv_', reviewFiles: 'rf_',
+};
+export const newId = (kind) => `${ID_PREFIX[kind] || OPS_KINDS[kind]?.prefix || 'x_'}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 export const clone = (x) => JSON.parse(JSON.stringify(x));
 
 // 사진 목록 순서: 최근 촬영일 먼저(날짜 없는 사진은 뒤), 같은 날이면 나중에 올린 것 먼저
@@ -293,6 +417,9 @@ function idbBackend(dbName, storeName) {
   };
 }
 
+// 브라우저에 쓰는 보관소(Node 테스트는 메모리)
+export const localBackend = (dbName, storeName) => (globalThis.indexedDB ? idbBackend(dbName, storeName) : memoryPhotoBackend());
+
 // 외부 데이터(JSON 파일 등)를 검증해 저장 형태로 바꾼다. 참조가 끊긴 레코드는 오류로 돌려준다.
 export function normalizeData(obj, stamp = new Date().toISOString()) {
   if (!obj || typeof obj !== 'object') fail('바로맵 데이터 파일이 아닙니다.');
@@ -331,15 +458,23 @@ export async function openStore(cfg = {}, opts = {}) {
 /**
  * @param {{ storage?: Storage, now?: () => Date, photoBackend?: ReturnType<typeof memoryPhotoBackend>, modelBackend?: ReturnType<typeof memoryPhotoBackend> }} [opts]
  */
-export function createStore({ storage = globalThis.localStorage, now = () => new Date(), photoBackend, modelBackend } = {}) {
+export function createStore({ storage = globalThis.localStorage, now = () => new Date(), photoBackend, modelBackend, bimBackend, opsBackend } = {}) {
   let data = empty();
   const listeners = new Set();
   const photoDb = photoBackend || (globalThis.indexedDB ? idbBackend('baromap-photos', 'photos') : memoryPhotoBackend());
   const photoCache = new Map(); // siteId → 사진 정보 목록(원본 제외)
   const modelDb = modelBackend || (globalThis.indexedDB ? idbBackend('baromap-models', 'models') : memoryPhotoBackend());
   const modelCache = new Map(); // siteId → 3D 모델 정보 목록(모양 데이터 제외)
+  // 건축도서·BIM: 행은 IndexedDB 'baromap-bim', 그림·요약·모델 파일은 'baromap-bim-files'
+  const bimRows = bimBackend?.rows || (globalThis.indexedDB ? idbBackend('baromap-bim', 'rows') : memoryPhotoBackend());
+  const bimFiles = bimBackend?.files || (globalThis.indexedDB ? idbBackend('baromap-bim-files', 'files') : memoryPhotoBackend());
+  // 현장 운영(v0.6): 행은 IndexedDB 'baromap-ops', 첨부는 'baromap-ops-files'
+  const opsRows = opsBackend?.rows || localBackend('baromap-ops', 'rows');
+  const opsFiles = opsBackend?.files || localBackend('baromap-ops-files', 'files');
 
   const notify = () => { for (const fn of listeners) fn(); };
+  const bim = createLocalBim({ rowsDb: bimRows, filesDb: bimFiles, now, notify, sites: () => data.sites });
+  const opsApi = createLocalOps({ rowsDb: opsRows, filesDb: opsFiles, now, notify, data: () => data, me: () => store.me });
 
   function persist() {
     try {
@@ -393,6 +528,8 @@ export function createStore({ storage = globalThis.localStorage, now = () => new
         for (const id of cache.keys()) if (!live.has(id)) cache.delete(id);
       } catch { /* 정리 실패는 다음에 다시 시도된다 */ }
     }
+    await bim.prune(live);
+    await opsApi.prune(live);
   }
 
   // 동·공종 시트 저장(새로 만들기·고치기)
@@ -414,6 +551,13 @@ export function createStore({ storage = globalThis.localStorage, now = () => new
     if (sample.progress) progSave(clone(sample.progress));
   }
 
+  // 운영 예시 기록(일보·협력사 …)은 IndexedDB라 비동기로 넣는다. 이전 버전 예시를 쓰던 브라우저도 한 번은 넣는다.
+  async function seedOps(sample) {
+    if (!sample?.ops) return;
+    await opsApi.seed(clone(sample.ops));
+    try { storage.setItem(OPS_SEED_KEY, '1'); } catch { /* 무시 */ }
+  }
+
   const normalize = (obj) => normalizeData(obj, now().toISOString());
 
   const store = {
@@ -433,6 +577,7 @@ export function createStore({ storage = globalThis.localStorage, now = () => new
       if (raw) {
         try {
           data = normalize(JSON.parse(raw));
+          if (data.sample && sampleFactory && !storage.getItem(OPS_SEED_KEY)) await seedOps(sampleFactory(now()));
           return store.snapshot();
         } catch (err) {
           // 손상된 데이터는 지우지 않고 따로 보관한 뒤 새로 시작한다.
@@ -440,8 +585,11 @@ export function createStore({ storage = globalThis.localStorage, now = () => new
           console.warn('[store] 저장된 데이터를 읽지 못했습니다.', err);
         }
       }
-      if (sampleFactory) useSample(sampleFactory(now()));
-      else {
+      if (sampleFactory) {
+        const sample = sampleFactory(now());
+        useSample(sample);
+        await seedOps(sample);
+      } else {
         data = empty();
         persist();
       }
@@ -525,8 +673,12 @@ export function createStore({ storage = globalThis.localStorage, now = () => new
 
     async resetSample(sampleFactory) {
       progSave({ buildings: [], sheets: [], cells: [] });
-      useSample(sampleFactory(now()));
+      const sample = sampleFactory(now());
+      data = empty();
       await pruneOrphans();
+      useSample(sample);
+      await pruneOrphans();
+      await seedOps(sample);
     },
 
     // 공정 현황(골구도). 브라우저 저장 모드는 바로 읽을 수 있어 load()가 따로 필요 없다.
@@ -644,6 +796,25 @@ export function createStore({ storage = globalThis.localStorage, now = () => new
         return URL.createObjectURL(rec.blob);
       },
     },
+
+    // 건축도서·AI 작업·BIM 모델(js/store-bim.js)
+    drawings: bim.drawings,
+    jobs: bim.jobs,
+    bim: bim.bim,
+    ai: bim.ai,
+
+    // 현장 운영(js/store-ops.js)
+    rows: opsApi.rows,
+    ops: opsApi.ops,
+    files: opsApi.files,
+    docs: opsApi.docs,
+    weather: opsApi.weather,
+    daily: opsApi.daily,
+    notices: opsApi.notices,
+    outbox: opsApi.outbox,
+    schedules: opsApi.schedules,
+    cost: opsApi.cost,
+    publicData: opsApi.publicData,
 
     // 예시 데이터 표시를 끈다(사용자가 자기 데이터를 쓰기 시작했을 때).
     async markReal() {

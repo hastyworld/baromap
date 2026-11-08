@@ -472,10 +472,17 @@ function sheetList(siteId) {
   });
 }
 
+// 3D 세대 보기(06 5절): 이 공종이 끝나면 진하게 보일 재료(분류 또는 '분류:이름'). 자동은 공종 이름으로 짐작.
+const TRADE_MATS = [['', '자동'], ['structure', '골조·콘크리트'], ['masonry', '조적'], ['insulation', '단열'], ['plaster', '미장'], ['board', '석고보드'], ['lightweight', '경량 칸막이'],
+  ['waterproof', '방수'], ['finish:타일', '타일'], ['finish:도배', '도배'], ['finish:마루', '마루'], ['finish:도장', '도장'], ['none', '재료 없음']];
+
 function tradeRow(t, i) {
+  const mat = t.mats?.[0] || '';
+  const opts = TRADE_MATS.some(([k]) => k === mat) ? TRADE_MATS : [...TRADE_MATS, [mat, mat]];
   return `<tr><td class="num">${i + 1}</td>
     <td><input name="tname" value="${esc(t.name || '')}" maxlength="30" placeholder="공종 이름" aria-label="공종 이름"></td>
     <td><input name="tcolor" type="color" value="${esc(t.color || TRADE_COLORS[i % TRADE_COLORS.length])}" aria-label="색"></td>
+    <td><select name="tmats" aria-label="3D에서 이 공종이 만드는 재료">${opts.map(([k, l]) => `<option value="${esc(k)}" ${k === mat ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></td>
     <td class="row-act"><button type="button" class="icon-btn sm" data-act="trade-up" aria-label="위로" title="위로">${icon('back')}</button>
       <button type="button" class="icon-btn sm" data-act="trade-del" aria-label="빼기" title="빼기">${icon('close')}</button></td></tr>`;
 }
@@ -495,7 +502,7 @@ function sheetDialog(siteId, rec = null, preset = null) {
         <label class="field"><span>시트 이름 <em>*</em></span><input name="name" value="${esc(rec?.name || preset?.name || '')}" maxlength="30" placeholder="예) 세대 마감" required></label>
         <label class="field"><span>표시 순서</span><input name="sort" type="number" value="${esc(rec?.sort ?? next)}"></label>
       </div>
-      <table class="trade-table"><thead><tr><th>번호</th><th>공종</th><th>색</th><th></th></tr></thead>
+      <table class="trade-table"><thead><tr><th>번호</th><th>공종</th><th>색</th><th title="3D 세대 보기에서 이 공종이 끝나면 진하게 보일 재료(자동: 공종 이름으로 짐작)">3D 재료</th><th></th></tr></thead>
         <tbody id="trade-rows">${trades.map(tradeRow).join('')}</tbody></table>
       <button type="button" class="btn sm ghost" data-act="trade-add">${icon('plus')}공종 추가</button>
       ${used ? `<p class="t-warn small">${icon('alert')}이미 ${used}칸이 입력돼 있습니다. 순서를 바꾸거나 빼면 칸의 숫자가 다른 공종을 가리키게 됩니다.</p>` : ''}
@@ -519,7 +526,10 @@ onAction('trade-up', (el) => {
 });
 
 onForm('sheet', async (data, form) => {
-  const trades = $$('#trade-rows tr', form).map((tr) => ({ name: tr.querySelector('[name=tname]').value, color: tr.querySelector('[name=tcolor]').value }));
+  const trades = $$('#trade-rows tr', form).map((tr) => {
+    const mat = tr.querySelector('[name=tmats]').value;
+    return { name: tr.querySelector('[name=tname]').value, color: tr.querySelector('[name=tcolor]').value, ...(mat ? { mats: [mat] } : {}) };
+  });
   const saved = await store.progress.saveSheet({ id: form.dataset.id || undefined, siteId: form.dataset.site, name: data.name, sort: data.sort, trades });
   closeModal(true);
   toast(`${saved.name} 시트를 저장했습니다.`);

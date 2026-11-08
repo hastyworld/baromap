@@ -2,6 +2,7 @@
 import { store, state, q } from './ctx.js';
 import { todayStr, panoView, PANO_LABEL, bearingDeg, distanceM } from './model.js';
 import { $, esc, icon, fmtDate, fmtDistance, onAction, onForm, openModal, closeModal, toast, confirmDialog, loadScript, loadCss } from './util.js';
+import { reviewFaces } from './ops/blur.js';
 
 const PANNELLUM = 'https://cdnjs.cloudflare.com/ajax/libs/pannellum/2.5.6/';
 const MAX_SIDE = 4096; // 휴대폰에서도 열리는 크기(대부분의 기기가 4096px까지 그린다)
@@ -56,6 +57,14 @@ const toJpeg = (canvas, quality) => new Promise((resolve, reject) => {
   canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('사진을 변환하지 못했습니다.'))), 'image/jpeg', quality);
 });
 
+// 미리보기: 가운데를 2:1로 잘라 640×320
+function panoThumb(c) {
+  let cw = c.width;
+  let ch = c.width / 2;
+  if (ch > c.height) { ch = c.height; cw = c.height * 2; }
+  return draw(c, 640, 320, [(c.width - cw) / 2, (c.height - ch) / 2, cw, ch]).toDataURL('image/jpeg', 0.72);
+}
+
 // 원본은 긴 변 4096px JPG로, 미리보기는 가운데를 2:1로 잘라 640×320으로 만든다.
 async function preparePhoto(file) {
   let src;
@@ -67,12 +76,9 @@ async function preparePhoto(file) {
     const scale = Math.min(1, MAX_SIDE / Math.max(W, H));
     const width = Math.max(1, Math.round(W * scale));
     const height = Math.max(1, Math.round(H * scale));
-    const blob = await toJpeg(draw(src, width, height), 0.85);
-    let cw = W;
-    let ch = W / 2;
-    if (ch > H) { ch = H; cw = H * 2; }
-    const thumb = draw(src, 640, 320, [(W - cw) / 2, (H - ch) / 2, cw, ch]).toDataURL('image/jpeg', 0.72);
-    return { file: blob, thumb, width, height };
+    const canvas = draw(src, width, height);
+    const blob = await toJpeg(canvas, 0.85);
+    return { file: blob, thumb: panoThumb(canvas), width, height, canvas };
   } catch (err) {
     if (/사진/.test(err.message)) throw err;
     throw new Error('사진이 너무 커서 이 기기에서 처리하지 못했습니다. 노트북에서 올려주세요.');
@@ -102,7 +108,7 @@ export function photoAddDialog(siteId) {
       <ul class="steps small muted">
         <li><b>360° 카메라 사진</b>(가로:세로 2:1)은 위아래까지 사방을, <b>휴대폰 파노라마</b>는 좌우로 둘러볼 수 있어요.</li>
         <li>큰 사진은 자동으로 줄여서 올립니다(긴 변 4096px).</li>
-        <li>사람 얼굴이나 차량 번호가 크게 찍히지 않게 주의해주세요.</li>
+        <li>올리기 전에 얼굴을 찾아 모자이크로 가립니다. 차량 번호는 손으로 가려주세요.</li>
       </ul>
     </form>`,
     footer: `<button type="button" class="btn ghost" data-act="modal-close">취소</button>
@@ -142,13 +148,14 @@ document.addEventListener('change', async (e) => {
 
 onForm('photo', async (data) => {
   if (!pending?.prepared) throw new Error('사진을 선택해주세요.');
-  const btn = $('#photo-submit');
-  if (btn) btn.innerHTML = `${icon('upload')}올리는 중…`;
-  try {
-    await store.photos.add({ siteId: pending.siteId, ...pending.prepared, takenAt: data.takenAt, caption: data.caption });
-  } finally {
-    if (btn) btn.innerHTML = `${icon('upload')}올리기`;
-  }
+  const { siteId, prepared } = pending;
+  const { canvas, ...photo } = prepared;
+  // 얼굴 가리기(11 2-2절): 2:1 사진은 적도 부근을 조각으로 나눠 찾는다. 취소하면 올리지 않는다
+  const { blurFaces } = await store.ops.settings(siteId);
+  const res = await reviewFaces([canvas], { pano: panoView(canvas.width, canvas.height).kind !== 'photo', enabled: blurFaces });
+  if (!res) return;
+  if (res[0].blurred) Object.assign(photo, { file: await toJpeg(canvas, 0.85), thumb: panoThumb(canvas) });
+  await store.photos.add({ siteId, ...photo, takenAt: data.takenAt, caption: data.caption });
   closeModal(true);
   toast('360° 사진을 올렸습니다.');
 });

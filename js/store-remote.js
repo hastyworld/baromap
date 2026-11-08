@@ -2,7 +2,10 @@
 // - 로그인한 사용자만 읽고, 권한(운영자/관리자/현장 담당/조회)은 DB의 RLS 정책이 최종 판단한다(supabase/schema.sql).
 // - 다른 사람이 고친 내용은 실시간(Realtime)으로 들어와 화면이 바로 바뀐다.
 // - 인터넷이 끊기면 마지막으로 받은 데이터를 읽기 전용으로 보여준다.
-import { validate, validateGeometry, validateCells, progressCache, cellWrites, applyCellWrites, normalizeData, newId, clone, byTaken, KINDS } from './store.js';
+import { validate, validateGeometry, validateCells, progressCache, cellWrites, applyCellWrites, normalizeData, newId, clone, byTaken, KINDS, localBackend } from './store.js';
+import { createRemoteBim, BIM_TABLES } from './store-bim.js';
+import { createRemoteOps } from './store-ops.js';
+import { OPS_TABLES } from './ops/kinds.js';
 
 const SUPABASE_SRC = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm';
 const CACHE_KEY = 'baromap.remote.cache.v1';
@@ -33,6 +36,7 @@ export function friendlyError(error) {
   if (code === 'PGRST116') return new Error('권한이 없거나 이미 다른 사람이 지운 항목입니다. 화면을 새로 고쳐 확인해주세요.');
   if (code === '23503') return new Error('연결된 현장 또는 숙소가 없습니다. 다른 사람이 지웠을 수 있으니 화면을 새로 고쳐주세요.');
   if (code === '23514' || code === '22P02' || code === '22007') return new Error('입력값이 허용 범위를 벗어났습니다. 내용을 확인해주세요.');
+  if (code === '42P01' || code === 'PGRST205' || /schema cache/i.test(msg)) return new Error('현장 운영 표가 아직 준비되지 않았습니다. 운영자에게 supabase/schema.sql 실행을 요청하세요.');
   if (/Failed to fetch|NetworkError|network|fetch failed/i.test(msg)) return new Error('서버에 연결할 수 없습니다. 인터넷 연결을 확인해주세요.');
   return new Error(msg ? `처리 중 오류가 발생했습니다: ${msg}` : '처리 중 오류가 발생했습니다.');
 }
@@ -43,6 +47,26 @@ function storageError(error) {
   if (/maximum allowed size|too large|payload/i.test(msg)) return new Error('사진 파일이 너무 큽니다(15MB까지).');
   if (/mime/i.test(msg)) return new Error('JPG 사진만 올릴 수 있습니다.');
   if (/object not found|not_found/i.test(msg)) return new Error('사진 파일을 찾지 못했습니다. 다른 사람이 지웠을 수 있습니다.');
+  return friendlyError(error);
+}
+
+// 건축도서·모델 저장 공간 오류
+function bimStorageError(error) {
+  const msg = String(error?.message || error || '');
+  if (/bucket not found/i.test(msg)) return new Error('도서 저장 공간이 아직 준비되지 않았습니다. 운영자에게 supabase/schema.sql 실행을 요청하세요.');
+  if (/maximum allowed size|too large|payload/i.test(msg)) return new Error('파일이 너무 큽니다. 도면을 나눠서 올려주세요.');
+  if (/mime/i.test(msg)) return new Error('허용되지 않는 파일 형식입니다.');
+  if (/object not found|not_found/i.test(msg)) return new Error('파일을 찾지 못했습니다. 다른 사람이 지웠거나 아직 올라가지 않았습니다.');
+  return friendlyError(error);
+}
+
+// 일보·안전 첨부 저장 공간 오류
+function opsStorageError(error) {
+  const msg = String(error?.message || error || '');
+  if (/bucket not found/i.test(msg)) return new Error('첨부 저장 공간이 아직 준비되지 않았습니다. 운영자에게 supabase/schema.sql 실행을 요청하세요.');
+  if (/maximum allowed size|too large|payload/i.test(msg)) return new Error('파일이 너무 큽니다(30MB까지).');
+  if (/mime/i.test(msg)) return new Error('사진·PDF·엑셀 파일만 올릴 수 있습니다.');
+  if (/object not found|not_found/i.test(msg)) return new Error('파일을 찾지 못했습니다. 다른 사람이 지웠을 수 있습니다.');
   return friendlyError(error);
 }
 
@@ -64,7 +88,7 @@ const isNetwork = (err) => /Failed to fetch|NetworkError|network|fetch failed|�
 /**
  * @param {{ url?: string, anonKey?: string, client?: any, storage?: Storage, now?: () => Date, redirectTo?: string }} opts
  */
-export async function createRemoteStore({ url, anonKey, client, storage = globalThis.localStorage, now = () => new Date(), redirectTo } = {}) {
+export async function createRemoteStore({ url, anonKey, client, storage = globalThis.localStorage, now = () => new Date(), redirectTo, opsBackend } = {}) {
   const sb = client || (await import(SUPABASE_SRC)).createClient(url, anonKey, {
     auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
   });
@@ -283,6 +307,12 @@ export async function createRemoteStore({ url, anonKey, client, storage = global
     for (const t of ['site_buildings', 'progress_sheets', 'unit_progress']) {
       dbChannel.on('postgres_changes', { event: '*', schema: 'public', table: t }, (p) => applyProgress(t, p));
     }
+    for (const t of BIM_TABLES) {
+      dbChannel.on('postgres_changes', { event: '*', schema: 'public', table: t }, (p) => bim.applyRealtime(t, p));
+    }
+    for (const t of [...OPS_TABLES, 'ops_settings']) {
+      dbChannel.on('postgres_changes', { event: '*', schema: 'public', table: t }, (p) => opsApi.applyRealtime(t, p));
+    }
     let first = true;
     dbChannel.subscribe((s) => {
       if (s === 'SUBSCRIBED') {
@@ -310,6 +340,7 @@ export async function createRemoteStore({ url, anonKey, client, storage = global
           photoCache.clear();
           progCache.clear();
           modelCache.clear();
+          bim.reset();
           await fetchAll().catch(() => {});
           subscribeRealtime();
         }
@@ -347,9 +378,34 @@ export async function createRemoteStore({ url, anonKey, client, storage = global
     applyProgress(table, { eventType: 'DELETE', old: { id } });
   }
 
+  const bim = createRemoteBim({ sb, notify, data: () => data, guardOnline, friendlyError, storageError: bimStorageError, me: () => me });
+  const opsApi = createRemoteOps({
+    sb, notify, data: () => data, me: () => me, now, friendlyError, storageError: opsStorageError, isNetwork, selectAll, storage,
+    offline: () => status === 'offline' || (typeof navigator !== 'undefined' && navigator.onLine === false),
+    cacheDb: opsBackend?.cache || localBackend('baromap-ops-cache', 'lists'),
+    outboxDb: opsBackend?.outbox || localBackend('baromap-ops-outbox', 'items'),
+  });
+
   const store = {
     KINDS,
     mode: 'remote',
+    // 건축도서·AI 작업·BIM 모델(js/store-bim.js)
+    drawings: bim.drawings,
+    jobs: bim.jobs,
+    bim: bim.bim,
+    ai: bim.ai,
+    // 현장 운영(js/store-ops.js)
+    rows: opsApi.rows,
+    ops: opsApi.ops,
+    files: opsApi.files,
+    docs: opsApi.docs,
+    weather: opsApi.weather,
+    daily: opsApi.daily,
+    notices: opsApi.notices,
+    outbox: opsApi.outbox,
+    schedules: opsApi.schedules,
+    cost: opsApi.cost,
+    publicData: opsApi.publicData,
     get me() { return me; },
     get status() { return status; },
     get offlineSince() { return offlineSince; },
@@ -361,7 +417,8 @@ export async function createRemoteStore({ url, anonKey, client, storage = global
       const assigned = (me?.siteIds || []).includes(siteId);
       if (action === 'view') return ROLE_RANK[role] >= 1;
       if (action === 'viewSite') return role === 'admin' || role === 'supervisor' || (['manager', 'viewer'].includes(role) && assigned);
-      if (action === 'viewResidents') return role === 'admin' || (['manager', 'viewer'].includes(role) && assigned);
+      if (action === 'viewResidents' || action === 'viewPeople') return role === 'admin' || (['manager', 'viewer'].includes(role) && assigned);
+      if (action === 'viewMoney') return role === 'admin' || role === 'supervisor' || (role === 'manager' && assigned);
       if (action === 'edit') return role === 'admin' || (role === 'manager' && assigned);
       if (action === 'editAny') return role === 'admin' || (role === 'manager' && (me.siteIds || []).length > 0);
       if (['admin', 'createSite', 'deleteSite', 'import'].includes(action)) return role === 'admin';
@@ -429,6 +486,10 @@ export async function createRemoteStore({ url, anonKey, client, storage = global
         data = cached.data;
         offlineSince = cached.at;
         setStatus('offline');
+      }
+      if (!store._opsStarted) {
+        store._opsStarted = true;
+        opsApi.start();
       }
       if (typeof window !== 'undefined' && !store._watching) {
         store._watching = true;

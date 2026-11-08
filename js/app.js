@@ -1,4 +1,4 @@
-// 화면: 지도 + 정보 패널(현장 개요 / 숙소 상세), 검색, 계약 만료 알림, 메뉴
+// 화면: 지도 + 정보 패널(현장 개요 / 숙소 상세), 검색, 알림, 메뉴
 import { CFG, kakaoKey, store, initStore, state, q, ui, ROLE_LABEL } from './ctx.js';
 import { sampleData } from './sample.js';
 import { todayStr, siteProgress, leaseStatus, occupancy, distanceM } from './model.js';
@@ -15,7 +15,24 @@ import { ensureSignedIn, accountDialog } from './auth-ui.js';
 import { usersDialog, auditDialog, pendingCount } from './admin-ui.js';
 import { photoLabel } from './photos.js';
 import { progressSection } from './progress.js';
+import { publicSection } from './public-ui.js';
 import { ensureModels, modelError } from './model3d.js';
+import './drawings.js';
+import './ai-read.js';
+import './model-build.js';
+import './docs-ui.js';
+import './bim/findings-ui.js';
+import { bimTour } from './bim/viewer.js';
+import './bim/edit.js';
+import './bim/review-ui.js';
+import './bim/real-ui.js';
+import './bim/takeoff-ui.js';
+import './bim/cost-ui.js';
+import './ops/index.js';
+import './ops/daily.js';
+import './ops/schedule-ui.js';
+import { alertCount, initNotices, renderNoticeBar } from './ops/notices.js';
+import { leaseAlerts } from './ops/calc/alerts.js';
 
 let map = null;
 const isMobile = () => matchMedia('(max-width: 760px)').matches;
@@ -59,6 +76,7 @@ function startApp() {
   render();
   initMap();
   leaseToastOnce();
+  initNotices();
 }
 
 function onDataChange() {
@@ -277,6 +295,7 @@ onAction('pick-cancel', () => {
 function render() {
   renderPanel();
   renderAlertCount();
+  renderNoticeBar();
   renderSampleBar();
   renderSync();
   syncMap();
@@ -381,11 +400,17 @@ function tourBlock(s) {
   const editable = canEdit(s.id);
   const pics = photos || [];
   const mods = models || [];
-  if (photos && models && !pics.length && !mods.length && !roadview && !editable) return '';
+  // 건축도서(도면 → AI 판독 → BIM): 그 현장을 볼 수 있는 사람은 보고, 현장 담당·운영자는 올린다
+  const drawingsChip = store.drawings ? `<button type="button" class="btn sm" data-act="drawings-open" data-site="${esc(s.id)}">${icon('file')}건축도서</button>` : '';
+  // 확정된 BIM(도서 → 판독 → 모델)이 있으면 단지 3D가 맨 위(06 1절), 초안은 현장 담당에게 단추로
+  const bim = bimTour(s.id);
+  if (photos && models && !pics.length && !mods.length && !roadview && !editable && !drawingsChip && !bim.hero) return '';
   const [m0] = mods;
   const [p0] = pics;
   let hero = '';
-  if (m0) {
+  if (bim.hero) {
+    hero = bim.hero;
+  } else if (m0) {
     hero = `<button type="button" class="tour-hero model" data-act="model-open" data-id="${esc(m0.id)}" aria-label="${esc(m0.name)} 3D로 보기">
       ${m0.thumb ? `<img src="${esc(m0.thumb)}" alt="">` : ''}
       <span class="tour-play">${icon('cube')}3D로 보기</span>
@@ -399,8 +424,10 @@ function tourBlock(s) {
     hero = `<div class="tour-empty">${icon('cube')}<span>도면(DXF)을 올리면 벽·기둥을 세워 <b>3D 모델</b>을 자동으로 만들어요. 동은 골구도 층수만큼 쌓습니다.</span></div>`;
   }
   const chips = [
-    ...mods.slice(m0 ? 1 : 0).map((m) => `<button type="button" class="btn sm" data-act="model-open" data-id="${esc(m.id)}">${icon('cube')}${esc(m.name)}</button>`),
-    pics.length && m0 ? `<button type="button" class="btn sm" data-act="photo-open" data-id="${esc(p0.id)}">${icon('globe')}360° 사진 ${pics.length}장</button>` : '',
+    bim.chip || '',
+    ...mods.slice(m0 && !bim.hero ? 1 : 0).map((m) => `<button type="button" class="btn sm" data-act="model-open" data-id="${esc(m.id)}">${icon('cube')}${esc(m.name)}</button>`),
+    pics.length && (m0 || bim.hero) ? `<button type="button" class="btn sm" data-act="photo-open" data-id="${esc(p0.id)}">${icon('globe')}360° 사진 ${pics.length}장</button>` : '',
+    drawingsChip,
     roadview,
     editable ? `<button type="button" class="btn sm ${m0 ? '' : 'primary'}" data-act="model-new">${icon('cube')}도면으로 3D</button>` : '',
     editable ? `<button type="button" class="btn sm ghost" data-act="photo-add">${icon('camera')}360° 사진</button>` : '',
@@ -462,6 +489,7 @@ function siteView(s) {
         </div>
       </header>
       ${tourBlock(s)}
+      ${store.can('viewSite', s.id) ? `<div class="ops-entry"><button type="button" class="btn" data-act="ops-open" data-site="${esc(s.id)}">${icon('hardhat')}운영 <small class="muted">일보·안전·이슈·예보</small></button></div>` : ''}
       ${progressBlock(s)}
       <dl class="kvs">
         ${kv('발주처', esc(s.client))}
@@ -480,6 +508,7 @@ function siteView(s) {
 function siteDetail(s, lodgings, people, cap) {
   return `
     ${progressSection(s)}
+    ${publicSection(s)}
 
     <div class="stats">
       <div><span>숙소</span><b>${lodgings.length}<small>곳</small></b></div>
@@ -762,49 +791,21 @@ document.addEventListener('mousedown', (e) => {
 });
 onAction('q-go', (el) => goSearch(qItems[Number(el.dataset.i)]));
 
-// ---------------------------------------------------------------- 계약 만료 알림
+// ---------------------------------------------------------------- 알림(js/ops/notices.js)
 
-function leaseAlerts() {
-  return state.data.lodgings
-    .map((l) => ({ l, st: leaseStatus(l.leaseEnd, today(), CFG.leaseAlertDays) }))
-    .filter((x) => x.st.level === 'expired' || x.st.level === 'soon')
-    .sort((a, b) => a.st.d - b.st.d);
-}
+const leaseList = () => leaseAlerts(state.data.lodgings, today(), CFG.leaseAlertDays);
 
 function renderAlertCount() {
-  const n = leaseAlerts().length;
+  const n = alertCount();
   const el = $('#alert-count');
   el.hidden = !n;
   el.textContent = n;
-  el.closest('button').setAttribute('aria-label', n ? `계약 만료 알림 ${n}건` : '계약 만료 알림');
+  el.closest('button').setAttribute('aria-label', n ? `알림 ${n}건` : '알림');
 }
-
-onAction('alerts', () => {
-  const list = leaseAlerts();
-  const row = ({ l, st }) => `<li><button type="button" class="row-btn" data-act="alert-go" data-id="${esc(l.id)}">
-      <span><b>${esc(l.name)}</b><small>${esc(q.site(l.siteId)?.name || '')} · 계약 종료 ${fmtDate(l.leaseEnd)} · 거주 ${q.residentCount(l.id)}명</small></span>
-      ${leaseBadge(l.leaseEnd)}</button></li>`;
-  const expired = list.filter((x) => x.st.level === 'expired');
-  const soon = list.filter((x) => x.st.level === 'soon');
-  openModal({
-    title: '계약 만료 알림',
-    body: list.length ? `
-      ${expired.length ? `<h3 class="list-title crit">이미 만료됨 ${expired.length}곳</h3><ul class="rows">${expired.map(row).join('')}</ul>` : ''}
-      ${soon.length ? `<h3 class="list-title warn">${CFG.leaseAlertDays}일 안에 만료 ${soon.length}곳</h3><ul class="rows">${soon.map(row).join('')}</ul>` : ''}
-      <p class="muted small">연장·해지 후에는 숙소 정보에서 계약 종료일을 바꿔주세요.</p>`
-      : `<p class="empty">${icon('check')}${CFG.leaseAlertDays}일 안에 만료되는 숙소 계약이 없습니다.</p>`,
-    footer: '<button type="button" class="btn" data-act="modal-close">닫기</button>',
-  });
-});
-
-onAction('alert-go', (el) => {
-  closeModal();
-  selectLodging(el.dataset.id);
-});
 
 // 하루에 한 번, 만료됐거나 7일 안에 만료되는 계약이 있으면 알려준다.
 function leaseToastOnce() {
-  const urgent = leaseAlerts().filter((x) => x.st.d <= 7);
+  const urgent = leaseList().filter((x) => x.st.d <= 7);
   if (!urgent.length) return;
   try {
     if (localStorage.getItem('baromap.leaseToast') === today()) return;

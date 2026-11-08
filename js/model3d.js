@@ -13,7 +13,8 @@ const SILL = 0.9; // 창 아래 높이
 const HEAD = 2.1; // 창 위 높이
 
 let three = null;
-async function loadThree() {
+// BIM 3D 보기(js/bim/viewer.js)도 같은 three.js를 쓴다
+export async function loadThree() {
   if (!three) {
     three = Promise.all([import(THREE_URL), import(ORBIT_URL)])
       .then(([T, O]) => ({ T, OrbitControls: O.OrbitControls }))

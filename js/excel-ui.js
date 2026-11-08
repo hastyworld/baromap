@@ -7,9 +7,23 @@ import { $, esc, icon, onAction, openModal, toast, loadScript, appDownloadBlocke
 
 const XLSX_SRC = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
 
-async function xlsx() {
+export async function xlsx() {
   await loadScript(XLSX_SRC);
   return window.XLSX;
+}
+
+// 시트 여러 개 쓰기: [{ name, rows }]
+export async function writeSheets(filename, sheets) {
+  if (appDownloadBlocked()) return;
+  const X = await xlsx();
+  const wb = X.utils.book_new();
+  for (const { name, rows } of sheets) {
+    const ws = X.utils.aoa_to_sheet(rows);
+    const width = Math.max(...rows.map((r) => r.length));
+    ws['!cols'] = Array.from({ length: width }, (_, i) => ({ wch: Math.min(40, Math.max(6, ...rows.slice(0, 80).map((r) => String(r[i] ?? '').length * 1.7))) }));
+    X.utils.book_append_sheet(wb, ws, name.slice(0, 31));
+  }
+  X.writeFile(wb, filename);
 }
 
 async function writeBook(filename, rowsByKind) {
