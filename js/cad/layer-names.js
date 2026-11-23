@@ -5,6 +5,11 @@ export const LAYER_RULES = [
   [/(TTLB|TITLE|도곽|FRAME|BORDER|표제)/i, 'frame'],
   [/(DIM|치수)/i, 'dimension'],
   [/(GRID|그리드|중심선|통심|AXIS|CEN(TER)?L)/i, 'grid'],
+  // 실제 도서(공공 아파트)의 줄임 이름: MC(모듈 중심선), WAL·CON·RC·GB(벽·콘크리트·석고보드 칸막이), DOR(문), FUR·FIX(가구·설비)
+  [/(^|[^A-Z])(MC|CEN)([^A-Z]|$)/i, 'grid'],
+  // 열쇠 그림(동딱지·KEY PLAN)과 바닥 타일 줄눈은 건물이 아니다 — 이름 없음(ignore)이면 벽 짝 찾기에 들어가 벽 조각이 됐다
+  [/동\s*딱지|KEY\s*-?\s*PLAN|키\s*(플랜|맵)/i, 'annotation'],
+  [/(^|[^A-Z])TILE([^A-Z]|$)|타일\s*(줄눈|나누기)/i, 'annotation'],
   [/(WALL|벽).*(PATT|HATCH|HTCH|해치|PAT)/i, 'wall_hatch'],
   [/(WALL|벽).*(IDEN|TAG|기호|SYM|NO\b)/i, 'wall_tag'],
   [/(DOOR|문).*(IDEN|TAG|기호|NO\b)/i, 'door_tag'],
@@ -31,6 +36,9 @@ export const LAYER_RULES = [
   [/(CURT|커튼)/i, 'curtain_wall'],
   [/(GLAZ|WIN|창호|유리|^창)/i, 'window'],
   [/(DOOR|^문$|^문[-_ ]|문틀|출입문)/i, 'door'],
+  [/(^|[^A-Z])DOR([^A-Z]|$)/i, 'door'],
+  [/(^|[^A-Z])(FUR|FIX|I-FL-FIX)([^A-Z]|$)|FIXT/i, 'furniture'],
+  [/(^|[^A-Z])(WAL|CON|CONC|RC|GB)([^A-Z]|$)/i, 'wall'],
   [/(COL|기둥)/i, 'column'],
   [/(STAIR|STRS|계단)/i, 'stair'],
   [/(ELEV|승강기|\bEV\b)/i, 'elevator'],
@@ -46,7 +54,7 @@ export const LAYER_RULES = [
 
 /** @returns {{ role: string, confidence: number }} */
 export function guessRole(name) {
-  const s = String(name || '');
+  const s = String(name || '').split('|').pop(); // 외부 참조 레이어("참조이름|A-WALL")는 뒤쪽 이름으로
   for (const [re, role] of LAYER_RULES) if (re.test(s)) return { role, confidence: role === 'ignore' ? 0.5 : 0.6 };
   return { role: 'ignore', confidence: 0.2 };
 }

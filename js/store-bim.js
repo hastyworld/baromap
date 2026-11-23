@@ -12,7 +12,7 @@ export const DEFAULT_AI = { enabled: false, keepOriginals: false, monthlyBudgetU
 
 export const sheetPaths = (siteId, setId, sheetId) => {
   const base = `${siteId}/${setId}/${sheetId}`;
-  return { png: `${base}.png`, thumb: `${base}.thumb.png`, digest: `${base}.json`, geom: `${base}.geom.json`, triage: `${base}.triage.json`, overlay: `${base}.triage.png`, tile: (n) => `${base}-t${n}.png` };
+  return { png: `${base}.png`, thumb: `${base}.thumb.png`, digest: `${base}.json`, geom: `${base}.geom.json`, geomGz: `${base}.geom.json.gz`, triage: `${base}.triage.json`, overlay: `${base}.triage.png`, tile: (n) => `${base}-t${n}.png` };
 };
 export const modelFolder = (siteId, modelId) => `${siteId}/${modelId}/`;
 export const originalPath = (siteId, setId, fileId) => `${siteId}/${setId}/${fileId}.dxf`;
@@ -65,7 +65,28 @@ function carryStatus(prev, next) {
 }
 
 const toJsonBlob = (obj) => new Blob([JSON.stringify(obj)], { type: 'application/json' });
-async function blobJson(b) { return JSON.parse(typeof b === 'string' ? b : await b.text()); }
+// 선 모양을 저장할 때 크기(풀었을 때 바이트)를 시트 통계에 함께 적는다 — 보기에서 선·그림을 고르는 데 쓴다(46 지시서 1.5)
+const withGeomBytes = (input, bytes) => ({ ...input, stats: { ...(input.stats || {}), geomBytes: bytes } });
+
+// 선 모양은 gzip으로 줄여 .geom.json.gz에 둔다(46 지시서 2절, 회사 도서 기준 약 9배). 저장 공간의 파일 종류 제한(그림·JSON)을
+// 바꾸지 않으려고 종류 표시는 JSON 그대로 두고, 읽을 때 첫 두 바이트(1f 8b)로 gzip인지 알아본다.
+export async function gzipJson(blob) {
+  if (typeof CompressionStream === 'undefined') return null; // 아주 옛 브라우저: 옛 경로에 그대로
+  const z = await new Response(blob.stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
+  return new Blob([z], { type: 'application/json' });
+}
+export async function blobJson(b) {
+  if (typeof b === 'string') return JSON.parse(b);
+  const head = new Uint8Array(await b.slice(0, 2).arrayBuffer());
+  if (head[0] === 0x1f && head[1] === 0x8b) return JSON.parse(await new Response(b.stream().pipeThrough(new DecompressionStream('gzip'))).text());
+  return JSON.parse(await b.text());
+}
+// 선 모양 읽기: gzip 경로를 먼저, 없으면 옛 .geom.json(옮기지 않은 기존 시트). 깨진 gzip은 오류 → 보기는 그림으로
+async function readGeom(get, P) {
+  let blob;
+  try { blob = await get(P.geomGz); } catch { blob = await get(P.geom); }
+  return blobJson(blob);
+}
 
 // ================================================================ 브라우저 저장(데모)
 
@@ -185,7 +206,12 @@ export function createLocalBim({ rowsDb, filesDb, now, notify, sites }) {
       if (assets.thumb) await putFile(P.thumb, assets.thumb);
       for (const t of assets.tiles || []) await putFile(P.tile(t.n), t.blob);
       if (assets.digest) await putFile(P.digest, toJsonBlob(assets.digest));
-      if (assets.geom) await putFile(P.geom, toJsonBlob(assets.geom));
+      if (assets.geom) {
+        const g = toJsonBlob(assets.geom);
+        const z = await gzipJson(g);
+        input = withGeomBytes(input, g.size);
+        await putFile(z ? P.geomGz : P.geom, z || g);
+      }
       if (assets.triage) await putFile(P.triage, toJsonBlob(assets.triage));
       const clean = validate('drawingSheets', { ...input, setId, imagePath: assets.png ? P.png : input.imagePath || '', digestPath: assets.digest ? P.digest : input.digestPath || '' }, { ...data(), siteId: set.siteId });
       const prev = (await all()).find((r) => r.id === id);
@@ -211,9 +237,10 @@ export function createLocalBim({ rowsDb, filesDb, now, notify, sites }) {
     async sheetAsset(sheet, kind) {
       const P = sheetPaths(sheet.siteId, sheet.setId, sheet.id);
       if (kind === 'triage') return filesDb.get(P.triage).then((r) => (r?.blob ? blobJson(r.blob) : null));
-      const path = kind === 'png' ? P.png : kind === 'thumb' ? P.thumb : kind === 'digest' ? P.digest : kind === 'geom' ? P.geom : P.tile(Number(String(kind).split(':')[1]));
+      if (kind === 'geom') return readGeom(getFile, P);
+      const path = kind === 'png' ? P.png : kind === 'thumb' ? P.thumb : kind === 'digest' ? P.digest : P.tile(Number(String(kind).split(':')[1]));
       const blob = await getFile(path);
-      if (kind === 'digest' || kind === 'geom') return blobJson(blob);
+      if (kind === 'digest') return blobJson(blob);
       if (kind === 'png-blob') return blob;
       if (!urls.has(path)) urls.set(path, URL.createObjectURL(blob));
       return urls.get(path);
@@ -221,6 +248,12 @@ export function createLocalBim({ rowsDb, filesDb, now, notify, sites }) {
     async sheetBlob(sheet, kind = 'png') {
       const P = sheetPaths(sheet.siteId, sheet.setId, sheet.id);
       return getFile(kind === 'png' ? P.png : kind === 'thumb' ? P.thumb : P.tile(Number(String(kind).split(':')[1])));
+    },
+    // 작은 그림 주소 여러 장 한 번에(도면 목록). 시트 id → 주소, 없으면 ''
+    async thumbUrls(sheets) {
+      const out = new Map();
+      await Promise.all(sheets.map(async (s) => out.set(s.id, await drawings.sheetAsset(s, 'thumb').catch(() => ''))));
+      return out;
     },
   };
 
@@ -474,7 +507,7 @@ export function createRemoteBim({ sb, notify, data, guardOnline, friendlyError, 
       if (!prev) return;
       const sheets = await q(sb.from('drawing_sheets').select('id, siteId, setId').eq('fileId', id));
       await q(sb.from('drawing_files').delete().eq('id', id).select('id'));
-      const paths = sheets.flatMap((s) => { const P = sheetPaths(s.siteId, s.setId, s.id); return [P.png, P.thumb, P.digest, P.geom, P.triage, P.overlay, ...[0, 1, 2, 3, 4, 5, 6, 7, 8].map(P.tile)]; });
+      const paths = sheets.flatMap((s) => { const P = sheetPaths(s.siteId, s.setId, s.id); return [P.png, P.thumb, P.digest, P.geom, P.geomGz, P.triage, P.overlay, ...[0, 1, 2, 3, 4, 5, 6, 7, 8].map(P.tile)]; });
       try { if (paths.length) await sb.storage.from(BUCKETS.sheets).remove(paths); if (prev.path) await sb.storage.from(BUCKETS.originals).remove([prev.path]); } catch { /* 무시 */ }
       C.files.remove(id);
       for (const s of sheets) C.sheets.remove(s.id);
@@ -500,7 +533,12 @@ export function createRemoteBim({ sb, notify, data, guardOnline, friendlyError, 
       if (assets.thumb) ups.push(upload(BUCKETS.sheets, P.thumb, assets.thumb, 'image/png'));
       for (const t of assets.tiles || []) ups.push(upload(BUCKETS.sheets, P.tile(t.n), t.blob, 'image/png'));
       if (assets.digest) ups.push(upload(BUCKETS.sheets, P.digest, toJsonBlob(assets.digest), 'application/json'));
-      if (assets.geom) ups.push(upload(BUCKETS.sheets, P.geom, toJsonBlob(assets.geom), 'application/json'));
+      if (assets.geom) {
+        const g = toJsonBlob(assets.geom);
+        const z = await gzipJson(g);
+        input = withGeomBytes(input, g.size);
+        ups.push(upload(BUCKETS.sheets, z ? P.geomGz : P.geom, z || g, 'application/json'));
+      }
       if (assets.triage) ups.push(upload(BUCKETS.sheets, P.triage, toJsonBlob(assets.triage), 'application/json'));
       await Promise.all(ups);
       if (assets.digest) jsonCache.set(P.digest, assets.digest);
@@ -542,7 +580,7 @@ export function createRemoteBim({ sb, notify, data, guardOnline, friendlyError, 
       }
       if (kind === 'digest' || kind === 'geom') {
         const path = kind === 'digest' ? P.digest : P.geom;
-        if (!jsonCache.has(path)) jsonCache.set(path, await blobJson(await download(BUCKETS.sheets, path)));
+        if (!jsonCache.has(path)) jsonCache.set(path, kind === 'geom' ? await readGeom((x) => download(BUCKETS.sheets, x), P) : await blobJson(await download(BUCKETS.sheets, path)));
         return jsonCache.get(path);
       }
       const path = kind === 'png' ? P.png : kind === 'thumb' ? P.thumb : P.tile(Number(String(kind).split(':')[1]));
@@ -551,6 +589,31 @@ export function createRemoteBim({ sb, notify, data, guardOnline, friendlyError, 
     async sheetBlob(sheet, kind = 'png') {
       const P = sheetPaths(sheet.siteId, sheet.setId, sheet.id);
       return download(BUCKETS.sheets, kind === 'png' ? P.png : kind === 'thumb' ? P.thumb : P.tile(Number(String(kind).split(':')[1])));
+    },
+    // 작은 그림 주소 여러 장을 요청 한 번에(createSignedUrls). 시트 id → 주소, 없으면 ''. 받은 주소는 50분 기억
+    async thumbUrls(sheets) {
+      const out = new Map();
+      const want = [];
+      for (const s of sheets) {
+        const path = sheetPaths(s.siteId, s.setId, s.id).thumb;
+        const hit = signed.get(`${BUCKETS.sheets}/${path}`);
+        if (hit && hit.until > Date.now()) out.set(s.id, hit.url); else want.push([s.id, path]);
+      }
+      if (!want.length) return out;
+      const api = sb.storage.from(BUCKETS.sheets);
+      if (typeof api.createSignedUrls !== 'function') {
+        await Promise.all(want.map(async ([id, path]) => out.set(id, await signedUrl(BUCKETS.sheets, path).catch(() => ''))));
+        return out;
+      }
+      const { data: list, error } = await api.createSignedUrls(want.map(([, path]) => path), 3600);
+      if (error) throw storageError(error);
+      want.forEach(([id, path], i) => {
+        const d = (list || [])[i];
+        const url = d && !d.error && (d.path == null || d.path === path) ? d.signedUrl : '';
+        if (url) signed.set(`${BUCKETS.sheets}/${path}`, { url, until: Date.now() + 50 * 60000 });
+        out.set(id, url || '');
+      });
+      return out;
     },
   };
 

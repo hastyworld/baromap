@@ -91,6 +91,7 @@ export function checkRefs(files) {
     for (const w of c.walls || []) if (w.assemblyId && !asm.has(w.assemblyId)) errors.push(`${name}: 벽 ${w.code || w.id}의 조립체 ${w.assemblyId}가 없습니다`);
     for (const o of c.openings || []) if (!walls.has(o.wallId)) errors.push(`${name}: 문·창 ${o.typeCode || o.id}가 붙은 벽 ${o.wallId}가 없습니다`);
     for (const s of c.spaces || []) for (const k of ['floor', 'wall', 'ceiling']) if (s.finish?.[k] && !asm.has(s.finish[k])) errors.push(`${name}: 실 ${s.name}의 ${k} 마감 ${s.finish[k]}가 없습니다`);
+    for (const s of c.spaces || []) for (const [k, label] of [['floorAssemblyId', '바닥'], ['ceilingAssemblyId', '천장']]) if (s[k] && !asm.has(s[k])) errors.push(`${name}: 실 ${s.name}의 ${label} 구성 ${s[k]}가 없습니다`);
   };
   for (const [name, f] of Object.entries(files)) {
     if (name.startsWith('u-')) container(name, f);
@@ -240,7 +241,7 @@ export function diffFiles(a, b) {
 // ---------------------------------------------------------------- 사람이 읽는 연산 설명(수정안 미리보기·대화 요약)
 
 const ZONE_KO = { waterproof: '방수', insulation: '단열', soundproof: '차음', fireproof: '내화' };
-const PATH_LABEL = { 'finish.floor': '바닥 마감', 'finish.wall': '벽 마감', 'finish.ceiling': '천장 마감', assemblyId: '벽체 조립체', code: '기호', thickness: '두께', name: '이름', use: '용도', zones: '시공부위', width: '폭', height: '높이', sill: '창대 높이', typeCode: '기호', layers: '층 구성', unitTypeId: '세대 타입', label: '호수', line: '라인', elevation: '바닥 높이', path: '위치', sides: '실내·실외 쪽', kind: '종류', transform: '배치', footprint: '외곽', floorsAbove: '지상 층수' };
+const PATH_LABEL = { 'finish.floor': '바닥 마감', 'finish.wall': '벽 마감', 'finish.ceiling': '천장 마감', floorAssemblyId: '바닥 구성', ceilingAssemblyId: '천장 구성', ceilingMm: '천장고', assemblyId: '벽체 조립체', code: '기호', thickness: '두께', name: '이름', use: '용도', zones: '시공부위', width: '폭', height: '높이', sill: '창대 높이', typeCode: '기호', layers: '층 구성', unitTypeId: '세대 타입', label: '호수', line: '라인', elevation: '바닥 높이', path: '위치', sides: '실내·실외 쪽', kind: '종류', transform: '배치', footprint: '외곽', floorsAbove: '지상 층수' };
 
 export function elementName(files, file, id) {
   const f = files[file];

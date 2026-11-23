@@ -5,6 +5,8 @@ import { CATEGORY_LABEL } from './materials-ko.js';
 import { ZONE_LABEL } from './materials-3d.js';
 import { KIND_LABEL } from './checks.js';
 import { SIDE_LABEL } from './facade.js';
+import { floorStack, ceilingStack, wallStack, spaceLabel, structureOf, structTag } from './parts.js';
+import { sectionCard } from './section-view.js';
 import { esc, icon } from '../util.js';
 
 export const METHOD_LABEL = { rule: '규칙 판독', ai: 'AI 판독', assumed: '추정(기본값)', manual: '직접 입력', doc: '문서 판독' };
@@ -109,7 +111,7 @@ export function layerTable(wall, ctx) {
 }
 
 function assemblyName(ctx, id) { return (ctx.catalog.assemblies || []).find((a) => a.id === id)?.name || ''; }
-function spaceName(ctx, id) { return ctx.type?.spaces.find((s) => s.id === id)?.name || ''; }
+function spaceName(ctx, id) { const s = ctx.type?.spaces.find((x) => x.id === id); return s ? spaceLabel(s) : ''; }
 
 /** 고른 요소 하나의 정보 */
 function oneHtml(ctx, el) {
@@ -131,21 +133,28 @@ function oneHtml(ctx, el) {
       + row('배치', o.transform?.mirror ? '좌우 대칭' : '') + row('공정', ctx.progressOf?.(o) || '');
     go = `<button type="button" class="btn sm primary" data-bv-go="unit" data-id="${esc(o.id)}">${icon('house')}세대 안 보기</button>`;
   } else if (kind === 'space') {
-    title = `${esc(o.name)} <small>${esc(USE_LABEL[o.use] || '')}</small>`;
+    title = `${esc(spaceLabel(o))} <small>${esc(USE_LABEL[o.use] || '')}</small>`;
     const f = o.finish || {};
     rows = row('면적', o.areaM2 ? `${o.areaM2.toFixed(2)}㎡` : '') + row('바닥', esc(assemblyName(ctx, f.floor))) + row('벽', esc(assemblyName(ctx, f.wall))) + row('천장', esc(assemblyName(ctx, f.ceiling)))
       + row('시공부위', (o.zones || []).map((z) => `<span class="badge info">${ZONE_LABEL[z]}</span>`).join(' '));
     const mats = new Map((ctx.catalog.materials || []).map((m) => [m.id, m]));
     const asms = (ctx.catalog.assemblies || []).filter((a) => [f.floor, f.wall, f.ceiling].includes(a.id));
-    extra = materialCards(asms.flatMap((a) => a.layers.map((l) => mats.get(l.materialId))), ctx);
+    // 부위 단면(42 지시서 3절): 바닥·천장 구성을 그림과 표로. 3D에서 누른 부위를 먼저 보인다
+    const fl = sectionCard('바닥 구성', floorStack(ctx.type, ctx.catalog, o, { level: ctx.floorLevel }), 'floor');
+    const cl = sectionCard('천장 구성', ceilingStack(ctx.type, ctx.catalog, o), 'ceiling');
+    const partNow = ctx.part?.id === o.id ? ctx.part.part : 'floor';
+    const tabs = `<div class="bv-parttabs" role="group" aria-label="부위">${[['floor', '바닥'], ['ceiling', '천장']].map(([k, l]) => `<button type="button" class="btn sm ${partNow === k ? 'on' : ''}" data-bv-part="${k}" aria-pressed="${partNow === k}" ${ctx.part?.id === o.id ? '' : 'disabled'}>${l}</button>`).join('')}</div>`;
+    extra = (ctx.part?.id === o.id ? tabs : '') + (partNow === 'ceiling' ? cl + fl : fl + cl) + materialCards(asms.flatMap((a) => a.layers.map((l) => mats.get(l.materialId))), ctx);
   } else if (kind === 'wall') {
     title = `벽 ${o.code ? esc(o.code) : ''} <small>${o.exterior ? '외벽' : '내벽'}</small>`;
     const [a, b] = o.path;
+    const st = structureOf(o, ctx.catalog);
     rows = row('길이', `${mm(Math.hypot(b[0] - a[0], b[1] - a[1]))}mm`) + row('두께', `${mm(o.thickness)}mm`) + row('조립체', esc(assemblyName(ctx, o.assemblyId)))
+      + row('구조', st ? `${esc(structTag(st).replace(/^구조 /, ''))}${st.by === 'assembly' ? ' <span class="muted small">벽체 기호로</span>' : ''}` : '')
       + row('실내 쪽', esc(spaceName(ctx, o.sides?.in))) + row('반대쪽', esc(spaceName(ctx, o.sides?.out)) || (o.exterior ? '바깥' : ''));
     const mats = new Map((ctx.catalog.materials || []).map((m) => [m.id, m]));
     const asm = (ctx.catalog.assemblies || []).find((a) => a.id === o.assemblyId);
-    extra = `<h4>층 구성</h4>${layerTable(o, ctx)}${materialCards((asm?.layers || []).map((l) => mats.get(l.materialId)), ctx)}`;
+    extra = `${sectionCard('벽 단면(층 구성)', wallStack(o, ctx.type, ctx.catalog), 'wall')}<h4>그림 두께</h4>${layerTable(o, ctx)}${materialCards((asm?.layers || []).map((l) => mats.get(l.materialId)), ctx)}`;
   } else if (kind === 'opening') {
     title = `${OPENING_LABEL[o.kind] || '개구부'} ${o.typeCode ? esc(o.typeCode) : ''}`;
     rows = row('크기', `${mm(o.width)} × ${mm(o.height)}mm`) + row('창대 높이', o.kind === 'window' ? `${mm(o.sill)}mm` : '');
@@ -189,8 +198,7 @@ function overviewHtml(ctx) {
   if (ctx.level === 'site') {
     const s = ctx.summary || {};
     return `<div class="bv-el"><h3>단지</h3><p class="small muted">동 ${s.apartments ?? '-'} · 세대 ${s.units ?? '-'} · 타입 ${s.unitTypes ?? '-'} · 시설 ${s.facilities ?? 0}</p>
-      <ul class="bv-list">${ctx.site.buildings.map((b) => `<li><button type="button" data-bv-go="building" data-id="${esc(b.id)}">${icon(b.kind === 'community' ? 'users' : 'building')}<b>${esc(b.name)}</b><span class="muted">${b.kind === 'apartment' ? `${b.floorsAbove}층` : '시설'}</span></button></li>`).join('')}</ul>
-      <p class="muted small">동을 두 번 누르면 들어갑니다. 끌어서 돌리고, 두 손가락(휠)으로 확대해요.</p></div>`;
+      <ul class="bv-list">${ctx.site.buildings.map((b) => `<li><button type="button" data-bv-go="building" data-id="${esc(b.id)}">${icon(b.kind === 'community' ? 'users' : 'building')}<b>${esc(b.name)}</b><span class="muted">${b.kind === 'apartment' ? `${b.floorsAbove}층` : '시설'}</span></button></li>`).join('')}</ul></div>`;
   }
   if (ctx.level === 'building') {
     const b = ctx.building;
@@ -198,16 +206,17 @@ function overviewHtml(ctx) {
     for (const u of b.units) count.set(u.unitTypeId, (count.get(u.unitTypeId) || 0) + 1);
     const floors = b.levels.filter((l) => l.height > 0 && !['rooftop', 'underground'].includes(l.kind)).length;
     return `<div class="bv-el"><h3>${esc(b.name)}</h3><p class="small muted">층 ${floors} · 세대 ${b.units.length}</p>
-      <h4>세대 타입</h4><ul class="bv-list">${[...count].map(([tid, n]) => { const t = ctx.types.get(tid); return `<li><button type="button" data-bv-go="type" data-id="${esc(tid)}">${icon('house')}<b>${esc(t?.name || tid)}</b><span class="muted">${n}세대${t?.areaM2 ? ` · ${t.areaM2.toFixed(0)}㎡` : ''}</span></button></li>`; }).join('') || '<li class="muted small">세대가 없습니다.</li>'}</ul>
-      <p class="muted small">세대를 두 번 누르면 안으로 들어갑니다.</p></div>`;
+      <h4>세대 타입</h4><ul class="bv-list">${[...count].map(([tid, n]) => { const t = ctx.types.get(tid); return `<li><button type="button" data-bv-go="type" data-id="${esc(tid)}">${icon('house')}<b>${esc(t?.name || tid)}</b><span class="muted">${n}세대${t?.areaM2 ? ` · ${t.areaM2.toFixed(0)}㎡` : ''}</span></button></li>`; }).join('') || '<li class="muted small">세대가 없습니다.</li>'}</ul></div>`;
   }
   const t = ctx.type;
   const wallLen = t.walls.reduce((s, w) => s + Math.hypot(w.path[1][0] - w.path[0][0], w.path[1][1] - w.path[0][1]), 0);
-  return `<div class="bv-el"><h3>${esc(t.name)} <small>${t.kind === 'facility' ? '시설' : '세대 타입'}</small></h3>
+  // 동 없는 모델(세대 도면만): 타입 목록으로 다른 타입을 연다
+  const typeList = !ctx.building && ctx.allTypes?.size ? `<h4>세대 타입 ${ctx.allTypes.size}개</h4><p class="muted small">배치도·동 평면이 없어 세대 타입만 보여요.</p>
+    <ul class="bv-list">${[...ctx.allTypes.values()].map((x) => `<li><button type="button" data-bv-go="type" data-id="${esc(x.id)}"${x.id === t.id ? ' aria-current="true"' : ''}>${icon(x.kind === 'facility' ? 'users' : 'house')}<b>${esc(x.name)}</b><span class="muted">${x.areaM2 ? `${x.areaM2.toFixed(0)}㎡ · ` : ''}실 ${x.spaces.length}</span></button></li>`).join('')}</ul>` : '';
+  return `${typeList}<div class="bv-el"><h3>${esc(t.name)} <small>${t.kind === 'facility' ? '시설' : '세대 타입'}</small></h3>
     <p class="small muted">${t.areaM2 ? `${t.areaM2.toFixed(1)}㎡ · ` : ''}실 ${t.spaces.length} · 벽 ${t.walls.length}(${wallLen.toFixed(1)}m) · 문·창 ${t.openings.length}</p>
     ${ctx.progressOf && ctx.unit ? `<p class="small">공정: ${ctx.progressOf(ctx.unit) || '시작 전'}</p>` : ''}
-    <ul class="bv-list">${t.spaces.map((s) => `<li><button type="button" data-bv-pick="${esc(s.id)}"><b>${esc(s.name)}</b><span class="muted">${s.areaM2 ? `${s.areaM2.toFixed(1)}㎡` : ''}${s.zones?.length ? ` · ${s.zones.map((z) => ZONE_LABEL[z]).join('·')}` : ''}</span></button></li>`).join('')}</ul>
-    <p class="muted small">벽을 누르면 층 구성(재료·두께)을 볼 수 있어요. [마감 층]·[단면]으로 속을 봅니다.</p></div>`;
+    <ul class="bv-list">${t.spaces.map((s) => `<li><button type="button" data-bv-pick="${esc(s.id)}"><b>${esc(spaceLabel(s))}</b><span class="muted">${s.areaM2 ? `${s.areaM2.toFixed(1)}㎡` : ''}${s.zones?.length ? ` · ${s.zones.map((z) => ZONE_LABEL[z]).join('·')}` : ''}</span></button></li>`).join('')}</ul></div>`;
 }
 
 /**

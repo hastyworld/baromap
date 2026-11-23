@@ -15,7 +15,7 @@ addDrawingsTool((dv, { set, sheets, editable }) => {
   if (!editable || !sheets.length) return '';
   const ready = sheets.some((s) => USE.has(s.category));
   return `<button type="button" class="btn sm ${busy === set.id ? '' : 'primary'}" data-act="model-build" ${busy || !ready ? 'disabled' : ''} title="${ready ? '시트로 단지·동·세대 3D 모델 만들기' : '평면·배치도 시트가 필요합니다'}">${icon('cube')}${busy === set.id ? '모델 만드는 중…' : '모델 만들기'}</button>`;
-});
+}, { fold: true });
 
 let worker = null;
 let seq = 0;
@@ -37,8 +37,9 @@ function runWorker(payload) {
   });
 }
 
-export async function buildFromSet(siteId, setId) {
-  const sheets = (store.drawings.cachedSheets(setId) || await store.drawings.sheets(setId)).filter((s) => USE.has(s.category));
+// skipFileIds: 3D에 넘기지 않는 파일(설비 등 보관만 하는 공종, 44 지시서 2.2)의 시트는 뺀다
+export async function buildFromSet(siteId, setId, { skipFileIds = null } = {}) {
+  const sheets = (store.drawings.cachedSheets(setId) || await store.drawings.sheets(setId)).filter((s) => USE.has(s.category) && !skipFileIds?.has(s.fileId));
   const geoms = [];
   for (const s of sheets) if (NEED_GEOM.has(s.category)) geoms.push([s.id, await store.drawings.sheetAsset(s, 'geom'), await store.drawings.sheetAsset(s, 'triage', { fresh: true }).catch(() => null)]);
   // 조경 범례 표는 시트 요약에 있다
@@ -83,9 +84,11 @@ onAction('model-build', async () => {
   }
 });
 
-async function finish(siteId, set, result) {
+async function finish(siteId, set, result, { quiet = false } = {}) {
   const model = await saveVersion(siteId, set, result);
-  await store.drawings.updateSet(set.id, { status: 'review', stats: { ...(set.stats || {}), model: { id: model.id, version: model.version, ...result.summary } } }).catch(() => {});
+  const fresh = (store.drawings.cached(siteId) || []).find((x) => x.id === set.id) || set;
+  await store.drawings.updateSet(set.id, { status: 'review', stats: { ...(fresh.stats || {}), model: { id: model.id, version: model.version, ...result.summary } } }).catch(() => {});
+  if (quiet) return model;
   const s = result.summary;
   const f = result.findings || [];
   const err = f.filter((x) => x.severity === 'error').length;
@@ -144,3 +147,26 @@ onForm('prog-proposal', async (data) => {
     rerenderDrawings();
   }
 });
+
+/**
+ * 묻지 않고 만들기(44 지시서 3.8): 도서를 다 읽으면 저절로 부른다. 골구도에 없는 동은 확인 창의 기본값대로 만든다(원칙 4).
+ * @returns {Promise<any>} 저장한 모델 버전
+ */
+export async function buildAndSave(siteId, set, { skipFileIds = null } = {}) {
+  await store.drawings.updateSet(set.id, { status: 'building' }).catch(() => {});
+  try {
+    let result = await buildFromSet(siteId, set.id, { skipFileIds });
+    const list = result.report.progressProposals || [];
+    if (list.length && store.progress && store.can('edit', siteId)) {
+      let made = 0;
+      for (let i = 0; i < list.length; i++) {
+        try { await store.progress.saveBuilding({ siteId, name: list[i].building, lines: list[i].lines, sort: i + 1 }); made++; } catch { /* 골구도를 못 만들어도 모델은 저장 */ }
+      }
+      if (made) result = await buildFromSet(siteId, set.id, { skipFileIds });
+    }
+    return await finish(siteId, set, result, { quiet: true });
+  } catch (err) {
+    await store.drawings.updateSet(set.id, { status: 'review' }).catch(() => {});
+    throw err;
+  }
+}

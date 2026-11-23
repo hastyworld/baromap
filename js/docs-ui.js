@@ -78,7 +78,8 @@ document.addEventListener('change', (e) => {
   if (e.target?.id === 'doc-files') { addFiles([...e.target.files]); e.target.value = ''; }
 });
 
-async function addOne(file, siteId, setId) {
+// 도서 한 번에 올리기(js/book-upload.js)도 문서(PDF·엑셀)·그림을 이 길로 넣는다
+export async function addOne(file, siteId, setId) {
   const name = file.name;
   if (isExcel(name)) {
     const sheets = await readExcel(file, name);

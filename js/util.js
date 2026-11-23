@@ -87,6 +87,7 @@ const ICONS = {
   layers: '<path d="m12 3 9 4.8-9 4.8-9-4.8z"/><path d="m3 12.2 9 4.8 9-4.8M3 16.6l9 4.8 9-4.8"/>',
   cut: '<circle cx="6" cy="6.5" r="2.8"/><circle cx="6" cy="17.5" r="2.8"/><path d="M8.3 8.2 20 19M8.3 15.8 20 5"/>',
   filter: '<path d="M3.5 5h17l-6.5 7.6V19l-4 2v-8.4z"/>',
+  lines: '<path d="M4 19 9.5 9.5l4.5 5.5L20 5"/><circle cx="4" cy="19" r="1.2"/><circle cx="20" cy="5" r="1.2"/>',
 };
 
 export function icon(name, cls = '') {

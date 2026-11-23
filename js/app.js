@@ -23,6 +23,7 @@ import './model-build.js';
 import './docs-ui.js';
 import './bim/findings-ui.js';
 import { bimTour } from './bim/viewer.js';
+import { bookDropHtml, bookAddHtml } from './book-upload.js';
 import './bim/edit.js';
 import './bim/review-ui.js';
 import './bim/real-ui.js';
@@ -407,9 +408,13 @@ function tourBlock(s) {
   if (photos && models && !pics.length && !mods.length && !roadview && !editable && !drawingsChip && !bim.hero) return '';
   const [m0] = mods;
   const [p0] = pics;
+  // 현장 담당·운영자: 3D가 없으면 큰 칸 하나 "도면 파일을 여기에 놓으세요"(44 지시서 3.1). 예전 방법은 "다른 방법" 아래에 접는다(원칙 7)
+  const book = editable && store.drawings;
   let hero = '';
   if (bim.hero) {
     hero = bim.hero;
+  } else if (book) {
+    hero = bookDropHtml(s.id);
   } else if (m0) {
     hero = `<button type="button" class="tour-hero model" data-act="model-open" data-id="${esc(m0.id)}" aria-label="${esc(m0.name)} 3D로 보기">
       ${m0.thumb ? `<img src="${esc(m0.thumb)}" alt="">` : ''}
@@ -423,14 +428,18 @@ function tourBlock(s) {
   } else if (models && editable) {
     hero = `<div class="tour-empty">${icon('cube')}<span>도면(DXF)을 올리면 벽·기둥을 세워 <b>3D 모델</b>을 자동으로 만들어요. 동은 골구도 층수만큼 쌓습니다.</span></div>`;
   }
+  const heroIsOld = !bim.hero && !book && m0; // 예전 3D(도면으로 3D)가 맨 위인 경우
+  const more = book ? `<details class="more-ways"><summary>다른 방법</summary><div class="more-ways-body">
+      ${bim.hero ? bookAddHtml(s.id) : ''}${drawingsChip}<button type="button" class="btn sm" data-act="model-new">${icon('cube')}도면으로 3D</button></div></details>` : '';
   const chips = [
     bim.chip || '',
-    ...mods.slice(m0 && !bim.hero ? 1 : 0).map((m) => `<button type="button" class="btn sm" data-act="model-open" data-id="${esc(m.id)}">${icon('cube')}${esc(m.name)}</button>`),
-    pics.length && (m0 || bim.hero) ? `<button type="button" class="btn sm" data-act="photo-open" data-id="${esc(p0.id)}">${icon('globe')}360° 사진 ${pics.length}장</button>` : '',
-    drawingsChip,
+    ...mods.slice(heroIsOld ? 1 : 0).map((m) => `<button type="button" class="btn sm" data-act="model-open" data-id="${esc(m.id)}">${icon('cube')}${esc(m.name)}</button>`),
+    pics.length && (m0 || bim.hero || book) ? `<button type="button" class="btn sm" data-act="photo-open" data-id="${esc(p0.id)}">${icon('globe')}360° 사진 ${pics.length}장</button>` : '',
+    book ? '' : drawingsChip,
     roadview,
-    editable ? `<button type="button" class="btn sm ${m0 ? '' : 'primary'}" data-act="model-new">${icon('cube')}도면으로 3D</button>` : '',
+    editable && !book ? `<button type="button" class="btn sm ${m0 ? '' : 'primary'}" data-act="model-new">${icon('cube')}도면으로 3D</button>` : '',
     editable ? `<button type="button" class="btn sm ghost" data-act="photo-add">${icon('camera')}360° 사진</button>` : '',
+    more,
   ].filter(Boolean).join('');
   let status = '';
   if (err) status = `<span class="t-warn small">${icon('alert')}불러오지 못했습니다</span><button type="button" class="link small" data-act="tour-retry">다시 시도</button>`;

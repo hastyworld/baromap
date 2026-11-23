@@ -4,7 +4,7 @@
 //   hatch  { k, h, layer, color, loops, pattern, solid }
 //   text   { k, h, layer, color, t, x, y, size, rot, kind, tag?, align, attach, w, box }
 //   insert { k, h, layer, name, x, y, rot, sx, sy, mirror, box, attribs, arcR, depth }
-//   dim    { k, h, layer, value, text, p1, p2, tp }
+//   dim    { k, h, layer, value, text, p1, p2, tp, dtype, dir? }(dir: 회전 치수의 잴 방향, 시트 좌표 단위 벡터)
 import { ID, apply, mul, det, scaleOf, angleOf, entityPaths, textCorners, boxOf, boxOk, boxesTouch, insertMatrix, boxTransform, emptyBox, unionBox } from './geom.js';
 import { walk } from './walk.js';
 import { blockExtent, viewportMatrix, viewportModelBox, viewportPaperBox, entityBox } from './sheets.js';
@@ -29,7 +29,38 @@ function blockArcR(dxf, name, depth = 0) {
   return r;
 }
 
-function pushItems(dxf, entities, matrix, out, { hidden, clip, pathPrefix = '' }) {
+// 점이 많은 선 줄이기(더글러스-포이커): 가구·설비 블록의 곡선이 선분 수백 개로 들어 있어 시트 한 장이 수십 MB가 됐다.
+// 허용 오차는 시트 크기의 0.005%(A1 1/40 도면이면 약 2mm) — 그림·판독에서 구분되지 않는다.
+export function simplifyPts(pts, tol, closed = false) {
+  if (pts.length <= 16 || !(tol > 0)) return pts;
+  const keep = new Uint8Array(pts.length);
+  keep[0] = 1;
+  keep[pts.length - 1] = 1;
+  const stack = [[0, pts.length - 1]];
+  const t2 = tol * tol;
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    const [ax, ay] = pts[a];
+    const [bx, by] = pts[b];
+    const dx = bx - ax;
+    const dy = by - ay;
+    const L = dx * dx + dy * dy;
+    let far = -1;
+    let fd = t2;
+    for (let i = a + 1; i < b; i++) {
+      const [px, py] = pts[i];
+      let d;
+      if (L === 0) d = (px - ax) ** 2 + (py - ay) ** 2;
+      else { const c = ((px - ax) * dy - (py - ay) * dx); d = (c * c) / L; }
+      if (d > fd) { fd = d; far = i; }
+    }
+    if (far > 0) { keep[far] = 1; stack.push([a, far], [far, b]); }
+  }
+  const out = pts.filter((_, i) => keep[i]);
+  return closed && out.length < 3 ? pts : out;
+}
+
+function pushItems(dxf, entities, matrix, out, { hidden, clip, pathPrefix = '', tol = 0 }) {
   walk(dxf, entities, (e, m, ctx) => {
     if (hidden.has(ctx.layer) || e.invisible) return e.type === 'insert' ? false : undefined;
     const base = { h: ctx.path, layer: ctx.layer, color: ctx.color, depth: ctx.depth };
@@ -60,7 +91,16 @@ function pushItems(dxf, entities, matrix, out, { hidden, clip, pathPrefix = '' }
     }
     if (e.type === 'dim') {
       const P = (p) => apply(m, p[0], p[1]);
-      out.push({ k: 'dim', ...base, value: e.value, text: e.text, p1: P(e.p1), p2: P(e.p2), tp: P(e.tp), dtype: e.dtype });
+      // 회전 치수(dtype 0)는 두 점 거리가 아니라 치수 방향으로 잰 길이다(가로 치수인데 두 점 높이가 다른 실제 도면)
+      let dir = null;
+      if (!e.dtype && Number.isFinite(e.rot)) {
+        const r = (e.rot * Math.PI) / 180;
+        const o = apply(m, 0, 0);
+        const q = apply(m, Math.cos(r), Math.sin(r));
+        const L = Math.hypot(q[0] - o[0], q[1] - o[1]) || 1;
+        dir = [(q[0] - o[0]) / L, (q[1] - o[1]) / L];
+      }
+      out.push({ k: 'dim', ...base, value: e.value, text: e.text, p1: P(e.p1), p2: P(e.p2), tp: P(e.tp), dtype: e.dtype, ...(dir ? { dir } : {}) });
       if (!dxf.blocks?.[e.block]) {
         out.push({ k: 'path', ...base, pts: [P(e.p1), P(e.p2)], closed: false, src: 'dim' });
         const s = e.text || (e.value != null ? String(Math.round(e.value)) : '');
@@ -70,14 +110,14 @@ function pushItems(dxf, entities, matrix, out, { hidden, clip, pathPrefix = '' }
     }
     if (e.type === 'viewport' || e.type === 'other') return undefined;
     if (e.type === 'hatch') {
-      const loops = e.loops.map((pts) => pts.map(([x, y]) => apply(m, x, y)));
+      const loops = e.loops.map((pts) => simplifyPts(pts.map(([x, y]) => apply(m, x, y)), tol, true));
       if (!loops.length) return undefined;
       if (clip && !boxesTouch(clip, boxOf(loops.flat()))) return undefined;
       out.push({ k: 'hatch', ...base, loops, pattern: e.pattern, solid: e.solid });
       return undefined;
     }
     for (const p of entityPaths(e)) {
-      const pts = p.pts.map(([x, y]) => apply(m, x, y));
+      const pts = simplifyPts(p.pts.map(([x, y]) => apply(m, x, y)), tol, p.closed);
       if (clip && !boxesTouch(clip, boxOf(pts))) continue;
       const item = { k: 'path', ...base, pts, closed: p.closed, src: e.type };
       if (e.lt) item.lt = e.lt;
@@ -98,14 +138,20 @@ function pushItems(dxf, entities, matrix, out, { hidden, clip, pathPrefix = '' }
 export function flattenSheet(dxf, sheet) {
   const hidden = hiddenLayers(dxf);
   const items = [];
-  pushItems(dxf, sheet.entities, ID, items, { hidden });
+  // 모형 공간 시트는 도곽 밖을 버린다: 외부 참조로 단지·지하층 전체를 깔고 도곽 안만 보이게 한 실제 도서에서
+  // 시트마다 단지 전체가 펼쳐져 메모리가 넘쳤다(동평면도 119장)
+  const f = sheet.frame;
+  const pad = f ? Math.max(f.x1 - f.x0, f.y1 - f.y0) * 0.01 : 0;
+  const clip = f && sheet.space === 'model' && sheet.method !== 'whole' ? [f.x0 - pad, f.y0 - pad, f.x1 + pad, f.y1 + pad] : null;
+  const tol = f ? Math.max(f.x1 - f.x0, f.y1 - f.y0) * 5e-5 : 0;
+  pushItems(dxf, sheet.entities, ID, items, { hidden, clip, tol });
   for (const v of sheet.viewports || []) {
     if (v.status === 0 && v.id === 0) continue;
     const vm = viewportMatrix(v);
     const mbox = viewportModelBox(v);
     const near = (sheet.modelEntities || []).filter((e) => { const b = entityBox(dxf, e); return b && boxesTouch(mbox, b); });
     const before = items.length;
-    pushItems(dxf, near, vm, items, { hidden, clip: viewportPaperBox(v), pathPrefix: `vp${v.h}` });
+    pushItems(dxf, near, vm, items, { hidden, clip: viewportPaperBox(v), pathPrefix: `vp${v.h}`, tol });
     for (let i = before; i < items.length; i++) items[i].vp = v.h;
   }
   return { frame: sheet.frame, items };
@@ -157,6 +203,8 @@ export function packSheet(flat) {
       if (it.table) o.tb = 1;
     } else if (it.k === 'dim') {
       Object.assign(o, { v: it.value == null ? null : R(it.value), t: it.text, p1: P([it.p1]), p2: P([it.p2]), tp: P([it.tp]) });
+      if (it.dtype) o.dt = it.dtype;
+      if (it.dir) o.dr = it.dir.map((v) => Math.round(v * 1e6) / 1e6);
     }
     if (it.vp) o.vp = it.vp;
     return o;
@@ -181,7 +229,8 @@ export function unpackSheet(g) {
     } else if (o.k === 'insert') {
       Object.assign(it, { name: o.n, x: o.x, y: o.y, rot: o.rot, sx: o.sx, sy: o.sy, box: o.b, attribs: o.a || {}, arcR: o.ar || 0, mirror: !!o.m, table: !!o.tb });
     } else if (o.k === 'dim') {
-      Object.assign(it, { value: o.v, text: o.t, p1: pts(o.p1)[0], p2: pts(o.p2)[0], tp: pts(o.tp)[0] });
+      Object.assign(it, { value: o.v, text: o.t, p1: pts(o.p1)[0], p2: pts(o.p2)[0], tp: pts(o.tp)[0], dtype: o.dt || 0 });
+      if (o.dr) it.dir = o.dr;
     }
     if (o.vp) it.vp = o.vp;
     return it;

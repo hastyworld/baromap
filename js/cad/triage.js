@@ -59,29 +59,55 @@ function segmentsOf(it) {
   return out;
 }
 
-// 칸으로 나눈 찾기(선분이 많아도 가까운 것만 본다)
+// 칸으로 나눈 찾기(선분이 많아도 가까운 것만 본다). 선분은 실제로 지나는 칸에만 넣는다
+// (상자 칸 전체에 넣으면 긴 대각선이 칸을 잔뜩 차지하고, 그래서 따로 둔 "긴 선" 목록을 찾을 때마다 복사해 큰 시트에서 판별이 수십 분 걸렸다)
 function spatial(segs, cell) {
   const g = new Map();
-  const key = (x, y) => `${x},${y}`;
+  const key = (x, y) => x * 1000003 + y; // 숫자 열쇠(문자열보다 빠르다)
+  const long = [];
   segs.forEach((s, i) => {
-    const x0 = Math.floor(Math.min(s.ax, s.bx) / cell);
-    const x1 = Math.floor(Math.max(s.ax, s.bx) / cell);
-    const y0 = Math.floor(Math.min(s.ay, s.by) / cell);
-    const y1 = Math.floor(Math.max(s.ay, s.by) / cell);
-    if ((x1 - x0 + 1) * (y1 - y0 + 1) > 4000) return; // 시트를 가로지르는 선은 칸에 넣지 않고 따로 본다
-    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) {
-      const k = key(x, y);
-      if (!g.has(k)) g.set(k, []);
-      g.get(k).push(i);
+    const L = hypot(s.bx - s.ax, s.by - s.ay);
+    const n = Math.ceil(L / (cell / 4));
+    if (n > 200000) { long.push(i); return; } // 50km 넘는 선(좌표 오류)만 따로
+    let last = null;
+    for (let k = 0; k <= n; k++) {
+      const t = n ? k / n : 0;
+      const kk = key(Math.floor((s.ax + (s.bx - s.ax) * t) / cell), Math.floor((s.ay + (s.by - s.ay) * t) / cell));
+      if (kk === last) continue;
+      last = kk;
+      const list = g.get(kk);
+      if (!list) g.set(kk, [i]);
+      else if (list[list.length - 1] !== i) list.push(i);
     }
   });
-  const long = segs.map((s, i) => i).filter((i) => { const s = segs[i]; return (Math.floor(Math.max(s.ax, s.bx) / cell) - Math.floor(Math.min(s.ax, s.bx) / cell) + 1) * (Math.floor(Math.max(s.ay, s.by) / cell) - Math.floor(Math.min(s.ay, s.by) / cell) + 1) > 4000; });
   return {
     near(x, y, r) {
       const out = new Set(long);
       for (let cx = Math.floor((x - r) / cell); cx <= Math.floor((x + r) / cell); cx++) {
         for (let cy = Math.floor((y - r) / cell); cy <= Math.floor((y + r) / cell); cy++) {
           for (const i of g.get(key(cx, cy)) || []) out.add(i);
+        }
+      }
+      return out;
+    },
+    // 선분 a→b를 따라 폭 r인 띠 안의 칸들(긴 치수선 둘레만 볼 때 — 정사각형보다 훨씬 적다). 선이 cap개를 넘으면 null(빽빽한 곳은 건너뛴다)
+    strip(ax, ay, bx, by, r, cap = Infinity) {
+      const out = new Set(long);
+      const seen = new Set();
+      const L = hypot(bx - ax, by - ay);
+      const n = Math.max(1, Math.ceil(L / cell));
+      const k = Math.ceil(r / cell);
+      for (let s = 0; s <= n; s++) {
+        const px = Math.floor((ax + ((bx - ax) * s) / n) / cell);
+        const py = Math.floor((ay + ((by - ay) * s) / n) / cell);
+        for (let cx = px - k; cx <= px + k; cx++) for (let cy = py - k; cy <= py + k; cy++) {
+          const kk = key(cx, cy);
+          if (seen.has(kk)) continue;
+          seen.add(kk);
+          const list = g.get(kk);
+          if (!list) continue;
+          if (out.size + list.length > cap) return null;
+          for (const i of list) out.add(i);
         }
       }
       return out;
@@ -228,15 +254,64 @@ function gridRule(items, res, segs, idx, uf, set) {
   });
 }
 
-function explodedDims(items, res, segs, idx, uf, set, dims) {
-  const texts = items.map((it, i) => ({ it, i })).filter(({ it }) => it.k === 'text' && NUMBER.test(String(it.t).trim()));
+// 폭발된 치수의 그린 길이: 치수선(같은 직선 위 토막들)에서 글자 양쪽의 가장 가까운 보조선·눈금 사이 거리.
+// 글자 자리에서 끊긴 치수선은 토막 하나가 숫자보다 짧고, 여러 치수가 한 줄로 이어진 연속 치수는 선 하나가 숫자보다 길다
+// — 토막·선 하나의 길이로 견주면 거짓 불일치가 났다(실제 도서 세대 평면 시트당 1~5건). 양쪽 끝을 못 찾으면 null
+function dimSpan(s, x, y, size, segs, idx, res, chars, valueM) {
+  const ux = (s.bx - s.ax) / s.L;
+  const uy = (s.by - s.ay) / s.L;
+  const off = (px, py) => (px - s.ax) * -uy + (py - s.ay) * ux;
+  const tOf = (px, py) => (px - s.ax) * ux + (py - s.ay) * uy;
+  const tx = tOf(x, y);
+  const pieces = [[0, s.L]];
+  const stops = [];
+  // 치수선을 따라 숫자 길이 안팎의 좁은 띠만 본다(정사각형으로 훑으면 숫자가 많은 큰 시트에서 매우 느리다)
+  const R = Math.min(s.L, Math.max(valueM, 0.3) * 1.3) + size * 6;
+  const cx = s.ax + ux * tx;
+  const cy = s.ay + uy * tx;
+  const near = idx.strip(cx - ux * R, cy - uy * R, cx + ux * R, cy + uy * R, size * 3, 3000);
+  if (!near) return null; // 선이 아주 빽빽한 곳(해치·가구 위)을 지나는 치수선은 재지 않는다(시간)
+  for (const j of near) {
+    const e = segs[j];
+    if (e === s || !e.L || (res[e.i] && res[e.i].why !== 'block_small')) continue;
+    const dot = Math.abs(((e.bx - e.ax) * ux + (e.by - e.ay) * uy) / e.L);
+    const oa = off(e.ax, e.ay);
+    const ob = off(e.bx, e.by);
+    if (dot > 0.999) {
+      if (Math.abs(oa) < size * 0.3 && Math.abs(ob) < size * 0.3) { const ta = tOf(e.ax, e.ay); const tb = tOf(e.bx, e.by); pieces.push([Math.min(ta, tb), Math.max(ta, tb)]); }
+      continue;
+    }
+    if (dot > 0.95) continue;
+    let t = null;
+    if (oa * ob <= 0) { const k = oa / (oa - ob || 1); t = tOf(e.ax + (e.bx - e.ax) * k, e.ay + (e.by - e.ay) * k); } // 축을 가로지름
+    else if (Math.abs(oa) <= size * 1.2 || Math.abs(ob) <= size * 1.2) t = Math.abs(oa) < Math.abs(ob) ? tOf(e.ax, e.ay) : tOf(e.bx, e.by); // 끝이 축에 닿음
+    if (t != null) stops.push(t);
+  }
+  // 글자 자리를 지나는 토막 묶음(사이 틈은 글자 폭까지)
+  pieces.sort((a, b) => a[0] - b[0]);
+  const gap = size * (chars + 2);
+  const chains = [];
+  for (const p of pieces) { const last = chains[chains.length - 1]; if (last && p[0] <= last[1] + gap) last[1] = Math.max(last[1], p[1]); else chains.push([...p]); }
+  const ch = chains.find((c) => tx >= c[0] - gap && tx <= c[1] + gap);
+  if (!ch) return null;
+  const tol = size * 0.5;
+  const left = stops.filter((t) => t < tx - tol && t >= ch[0] - tol).sort((a, b) => b - a)[0];
+  const right = stops.filter((t) => t > tx + tol && t <= ch[1] + tol).sort((a, b) => a - b)[0];
+  return left != null && right != null ? right - left : null;
+}
+
+function explodedDims(items, res, segs, idx, uf, set, dims, inDim = new Set()) {
+  // 치수(DIMENSION) 블록 안의 숫자는 이미 치수다 — 다시 짝지으면 엉뚱한 긴 선(벽)과 붙어 거짓 불일치가 났다(실제 도서 시트당 80개)
+  const texts = items.map((it, i) => ({ it, i })).filter(({ it, i }) => it.k === 'text' && !inDim.has(i) && NUMBER.test(String(it.t).trim()));
   const found = [];
   for (const { it, i } of texts) {
     const x = it.x * uf;
     const y = it.y * uf;
     const size = (it.size || 0) * uf || 0.2;
     const value = Number(String(it.t).replace(/[,\smM]/g, ''));
-    let best = null;
+    // 글자와 나란한 가까운 선들. 여러 줄 치수에서는 가장 가까운 선이 다른 줄일 수 있어(실제 도서: 숫자 아래 0.12m 줄이 아니라 위 0.20m 줄이 짝),
+    // 보조선 사이 길이가 숫자와 맞는 선을 먼저 고르고, 없으면 가장 가까운 선
+    const cands = [];
     for (const j of idx.near(x, y, size * 3)) {
       const s = segs[j];
       if (res[s.i] && res[s.i].why !== 'block_small') continue;
@@ -245,9 +320,21 @@ function explodedDims(items, res, segs, idx, uf, set, dims) {
       const ang = ((Math.atan2(s.by - s.ay, s.bx - s.ax) * 180) / Math.PI + 360) % 180;
       const rot = (((it.rot || 0) % 180) + 180) % 180;
       if (Math.min(Math.abs(ang - rot), 180 - Math.abs(ang - rot)) > 3) continue;
-      if (!best || d < best.d) best = { s, d };
+      cands.push({ s, d });
     }
-    if (!best) continue;
+    if (!cands.length) continue;
+    cands.sort((a, b) => a.d - b.d);
+    const near1 = (m) => value > 0 && Math.abs(m * 1000 - value) <= Math.max(2, value * 0.01);
+    let best = cands[0];
+    let span = null;
+    if (!near1(best.s.L)) {
+      for (const c of cands.slice(0, 3)) {
+        if (near1(c.s.L)) { best = c; span = null; break; }
+        const sp = dimSpan(c.s, x, y, size, segs, idx, res, String(it.t).trim().length, value / 1000);
+        if (c === cands[0]) span = sp;
+        if (sp != null && near1(sp)) { best = c; span = sp; break; }
+      }
+    }
     const { s } = best;
     const ux = (s.bx - s.ax) / s.L;
     const uy = (s.by - s.ay) / s.L;
@@ -264,18 +351,25 @@ function explodedDims(items, res, segs, idx, uf, set, dims) {
         else if (e.L <= size * 3 && dot < 0.95) { ticks++; ext.push(e); }
       }
     }
-    const match = value > 0 && Math.abs(s.L * 1000 - value) <= Math.max(2, value * 0.01);
+    const lenM = span != null && span > 0 ? span : s.L;
+    const match = value > 0 && (Math.abs(s.L * 1000 - value) <= Math.max(2, value * 0.01) || Math.abs(lenM * 1000 - value) <= Math.max(2, value * 0.01));
+    // 선이 숫자보다 길면 글자가 선 가운데쯤(20~80%)에 있어야 치수다 — 긴 벽 끝의 숫자 글자는 치수가 아니다
+    // (글자 자리에서 둘로 끊긴 치수선은 선이 숫자보다 짧아 이 검사를 하지 않는다)
+    const along = ((x - s.ax) * ux + (y - s.ay) * uy) / (s.L || 1);
+    if (!match && value < s.L * 1000 && (along < 0.2 || along > 0.8)) continue;
+    // 선 길이의 1/5도 안 되는 숫자(기울기 0.47, 줄눈 15 옆 17m 선)는 다른 글자다(치수선 토막은 숫자보다 짧을 수 있어 반대쪽은 안 본다)
+    if (!match && (value <= 0 || value / (s.L * 1000) < 0.2)) continue;
     const solids = items.reduce((n, a, j) => {
       if (a.src !== 'solid' || !a.pts?.length) return n;
       const [ax, ay] = [a.pts[0][0] * uf, a.pts[0][1] * uf];
       return endDist(ax, ay, s) <= size * 2 ? n + 1 : n;
     }, 0);
     if (!(ext.length >= 1 || ticks || solids || match)) continue;
-    found.push({ s, ext, text: i });
+    found.push({ s, ext, text: i, lenM: Math.abs(s.L * 1000 - value) <= Math.max(2, value * 0.01) ? s.L : lenM });
   }
   for (const f of found) {
     const value = Number(String(items[f.text].t).replace(/[,\smM]/g, ''));
-    if (value > 0) dims.push({ h: items[f.text].h, value, lenM: Math.round(f.s.L * 1000) / 1000, at: [items[f.text].x, items[f.text].y] });
+    if (value > 0) dims.push({ h: items[f.text].h, value, lenM: Math.round(f.lenM * 1000) / 1000, at: [items[f.text].x, items[f.text].y] });
     set(f.s.i, 'dimension', null, 0.85, 'dim_exploded', true);
     set(f.text, 'dimension', null, 0.85, 'dim_exploded', true);
     for (const e of f.ext) set(e.i, 'dimension', null, 0.8, 'dim_exploded', true);
@@ -364,27 +458,51 @@ function wallRule(items, res, segs, uf, roles, set) {
   const parent = runs.map((_, i) => i);
   const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
   const join = (a, b) => { parent[find(a)] = find(b); };
+  // 같은 평면을 한 줄로 여러 번 놓은 큰 시트(실제 도서: 개체 44만)에서 모든 짝을 견주면 판별이 수십 분 걸렸다 —
+  // 줄 방향으로 칸(TC m)을 나눠 겹칠 수 있는 것끼리만 견준다(45 지시서 4.1). 결과(짝·덮인 구간)는 예전과 같다
+  const TC = 2;
+  const firstAt = (arr, v) => { let lo = 0; let hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m].off < v) lo = m + 1; else hi = m; } return lo; };
   for (const list of byAng.values()) {
     list.sort((a, b) => a.off - b.off);
-    for (let i = 0; i < list.length; i++) {
-      for (let j = i + 1; j < list.length; j++) {
-        const r = list[i];
-        const q = list[j];
-        const d = q.off - r.off;
-        if (d > MAX_T) break;
-        if (d < MIN_T) continue;
-        const lo = Math.max(r.t0, q.t0);
-        const hi = Math.min(r.t1, q.t1);
-        if (hi - lo < Math.max(0.15, 0.3 * Math.min(r.t1 - r.t0, q.t1 - q.t0))) continue;
-        r.cover.push([lo, hi]);
-        q.cover.push([lo, hi]);
-        join(r.i, q.i);
+    const cells = new Map();
+    for (const r of list) {
+      for (let c = Math.floor(r.t0 / TC); c <= Math.floor(r.t1 / TC); c++) {
+        let arr = cells.get(c);
+        if (!arr) cells.set(c, (arr = []));
+        arr.push(r); // list가 off 순이라 칸 안도 off 순
       }
-      // 문·창 틈으로 끊긴 같은 벽(같은 줄, 틈 4m 이하)
-      for (let j = i + 1; j < list.length && list[j].off - list[i].off < 0.004; j++) {
-        const gap = Math.max(list[i].t0, list[j].t0) - Math.min(list[i].t1, list[j].t1);
-        if (gap <= 4) join(list[i].i, list[j].i);
+    }
+    for (const r of list) {
+      const seen = new Set();
+      for (let c = Math.floor(r.t0 / TC); c <= Math.floor(r.t1 / TC); c++) {
+        const arr = cells.get(c);
+        if (!arr) continue;
+        for (let m = firstAt(arr, r.off + MIN_T); m < arr.length && arr[m].off - r.off <= MAX_T; m++) {
+          const q = arr[m];
+          if (seen.has(q)) continue;
+          seen.add(q);
+          const lo = Math.max(r.t0, q.t0);
+          const hi = Math.min(r.t1, q.t1);
+          if (hi - lo < Math.max(0.15, 0.3 * Math.min(r.t1 - r.t0, q.t1 - q.t0))) continue;
+          r.cover.push([lo, hi]);
+          q.cover.push([lo, hi]);
+          join(r.i, q.i);
+        }
       }
+    }
+    // 문·창 틈으로 끊긴 같은 벽(같은 줄, 틈 4m 이하): 줄마다 t 순서로, 지금까지 가장 멀리 간 토막과 견준다(모든 짝과 같은 결과)
+    for (let i = 0; i < list.length;) {
+      let j = i;
+      while (j + 1 < list.length && list[j + 1].off - list[i].off < 0.004) j++;
+      if (j > i) {
+        const same = list.slice(i, j + 1).sort((a, b) => a.t0 - b.t0);
+        let top = same[0];
+        for (let k = 1; k < same.length; k++) {
+          if (same[k].t0 - top.t1 <= 4) join(top.i, same[k].i);
+          if (same[k].t1 > top.t1) top = same[k];
+        }
+      }
+      i = j + 1;
     }
   }
   // 모서리로 이어진 벽끼리 그물로: 끝점이 다른 줄의 끝점 가까이
@@ -396,18 +514,20 @@ function wallRule(items, res, segs, uf, roles, set) {
     for (const t of [r.t0, r.t1]) ends.push({ r, x: t * ux - r.off * uy, y: t * uy + r.off * ux });
   }
   const cell = new Map();
-  const ck = (x, y) => `${Math.floor(x / 0.7)},${Math.floor(y / 0.7)}`;
-  for (const e of ends) { const k = ck(e.x, e.y); if (!cell.has(k)) cell.set(k, []); cell.get(k).push(e); }
+  const nk = (cx, cy) => cx * 1000003 + cy; // 숫자 열쇠(문자열보다 빠르다)
+  for (const e of ends) { const k = nk(Math.floor(e.x / 0.7), Math.floor(e.y / 0.7)); if (!cell.has(k)) cell.set(k, []); cell.get(k).push(e); }
   for (const e of ends) {
+    const ex = Math.floor(e.x / 0.7);
+    const ey = Math.floor(e.y / 0.7);
     for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
-      for (const f of cell.get(`${Math.floor(e.x / 0.7) + dx},${Math.floor(e.y / 0.7) + dy}`) || []) {
+      for (const f of cell.get(nk(ex + dx, ey + dy)) || []) {
         if (f.r !== e.r && hypot(f.x - e.x, f.y - e.y) <= JOIN) join(e.r.i, f.r.i);
       }
     }
   }
   // 짧은 벽이 긴 벽 몸통에 T자로 붙는 곳
   const body = new Map();
-  const bk = (x, y) => `${Math.floor(x / 2)},${Math.floor(y / 2)}`;
+  const bk = (x, y) => nk(Math.floor(x / 2), Math.floor(y / 2));
   for (const r of runs) {
     if (!r.cover.length) continue;
     const [ux, uy] = unit(r);
@@ -420,8 +540,10 @@ function wallRule(items, res, segs, uf, roles, set) {
     }
   }
   for (const e of ends) {
+    const ex = Math.floor(e.x / 2);
+    const ey = Math.floor(e.y / 2);
     for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
-      for (const r of body.get(`${Math.floor(e.x / 2) + dx},${Math.floor(e.y / 2) + dy}`) || []) {
+      for (const r of body.get(nk(ex + dx, ey + dy)) || []) {
         if (r === e.r || r.ang === e.r.ang) continue;
         const [ux, uy] = unit(r);
         const t = e.x * ux + e.y * uy;
@@ -546,8 +668,12 @@ export function triageSheet(flat, { layerRoles = {}, uf = 0.001, layers = {}, ta
   });
   const idx = spatial(segs, 1);
   gridRule(items, res, segs, idx, uf, set);
-  const dims = items.filter((it) => it.k === 'dim' && it.value > 0).map((it) => ({ h: it.h, value: it.text && /^[\d,.]+$/.test(it.text) ? Number(it.text.replace(/,/g, '')) : it.value, lenM: Math.round(hypot(it.p2[0] - it.p1[0], it.p2[1] - it.p1[1]) * uf * 1000) / 1000, at: it.tp }));
-  explodedDims(items, res, segs, idx, uf, set, dims);
+  // 길이 치수(회전·정렬)만 견준다 — 각도·지름·반지름 치수 값(0.47 라디안 등)을 길이와 견주면 거짓 불일치가 쏟아졌다
+  const dimLen = (it) => (it.dir ? Math.abs((it.p2[0] - it.p1[0]) * it.dir[0] + (it.p2[1] - it.p1[1]) * it.dir[1]) : hypot(it.p2[0] - it.p1[0], it.p2[1] - it.p1[1]));
+  const dims = items.filter((it) => it.k === 'dim' && it.value > 0 && (it.dtype || 0) <= 1).map((it) => ({ h: it.h, value: it.text && /^[\d,.]+$/.test(it.text) ? Number(it.text.replace(/,/g, '')) : it.value, lenM: Math.round(dimLen(it) * uf * 1000) / 1000, at: it.tp }));
+  const inDim = new Set();
+  for (const [h, i] of owners) if (items[i].k === 'dim') for (const j of kids.get(h) || []) inDim.add(j);
+  explodedDims(items, res, segs, idx, uf, set, dims, inDim);
   // 벽 후보를 먼저 알아 둔다: 기울여 그린 건물은 벽이 모두 빗금이라 인출선으로 오해받고,
   // 인출선의 수평 부분은 벽 면과 우연히 나란할 수 있다. 빗금이 벽 후보가 아닐 때만 인출선이다
   const wallish = new Set();

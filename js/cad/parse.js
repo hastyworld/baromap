@@ -381,7 +381,8 @@ function toEntity(type, pairs, extra) {
       break;
     }
     case 'VIEWPORT':
-      e = { type: 'viewport', c: pt(list, 10, 20), w: firstNum(list, 40), hgt: firstNum(list, 41), id: firstNum(list, 69), status: firstNum(list, 90), vc: pt(list, 12, 22), vh: firstNum(list, 45), twist: firstNum(list, 51) };
+      // 12/22 뷰 중심은 DCS 좌표(보는 점 17/27/37에서 잰 값) — 모형 좌표는 보는 점 + 뷰 중심(45 지시서 4.3)
+      e = { type: 'viewport', c: pt(list, 10, 20), w: firstNum(list, 40), hgt: firstNum(list, 41), id: firstNum(list, 69), status: firstNum(list, 90), vc: pt(list, 12, 22), tg: pt(list, 17, 27), vh: firstNum(list, 45), twist: firstNum(list, 51) };
       break;
     case 'SOLID':
     case 'TRACE':
@@ -505,6 +506,7 @@ export function createDxfParser() {
         flushParent();
         const { c, list } = split(o.pairs);
         block = { name: first(list, 2, ''), base: pt(list, 10, 20), h: c.h, owner: c.owner, flags: firstNum(list, 70), layer: c.layer, entities: [], attdefs: [] };
+        if (block.flags & 4) block.xrefPath = first(list, 1, ''); // 외부 참조(XREF): 경로만 있고 내용은 다른 파일
         return;
       }
       if (o.type === 'ENDBLK') {
@@ -530,8 +532,8 @@ export function createDxfParser() {
       case '$LTSCALE': h.ltscale = num(v, 1); break;
       case '$DIMSCALE': h.dimscale = num(v, 1); break;
       case '$MEASUREMENT': h.measurement = num(v); break;
-      case '$EXTMIN': case '$EXTMAX': {
-        const key = hvar === '$EXTMIN' ? 'extmin' : 'extmax';
+      case '$EXTMIN': case '$EXTMAX': case '$INSBASE': {
+        const key = hvar === '$EXTMIN' ? 'extmin' : hvar === '$EXTMAX' ? 'extmax' : 'insbase';
         h[key] ||= [0, 0];
         if (code === 10) h[key][0] = num(v);
         else if (code === 20) h[key][1] = num(v);

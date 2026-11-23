@@ -42,6 +42,9 @@ export function collectWallInput(items, roles, uf) {
     if (it.k !== 'path' || !it.pts?.length) continue;
     const pts = it.pts.map(P);
     if (role === 'column' && it.closed) { columns.push({ pts, h: it.h }); continue; }
+    if (!it.closed && isWiggle(pts)) continue; // 칸막이 속 단열재 물결선(실제 도서: 80mm 가짜 벽 짝 500개)
+    // 벽 이름이 아닌 레이어의 100㎡ 넘는 직사각형(도면 틀·영역선, 실제 도서: 이름이 숫자인 레이어의 17m 겹 네모)
+    if (it.closed && roles[it.layer] !== 'wall' && isBigRect(pts)) continue;
     if (it.closed && pts.length >= 3) {
       const a = polyArea(pts);
       const per = perimeter(pts);
@@ -52,6 +55,37 @@ export function collectWallInput(items, roles, uf) {
   }
   const clean = dedupSegs(segs);
   return { segs: items.some((it) => it.tc !== undefined) ? joinFragments(clean) : clean, solids, columns };
+}
+
+export function isBigRect(pts) {
+  const p = pts.length > 4 && len(sub(pts[0], pts[pts.length - 1])) < 1e-6 ? pts.slice(0, -1) : pts;
+  if (p.length !== 4 || polyArea(p) < 100) return false;
+  for (let i = 0; i < 4; i++) {
+    const a = unit(sub(p[(i + 1) % 4], p[i]));
+    const b = unit(sub(p[(i + 2) % 4], p[(i + 1) % 4]));
+    if (Math.abs(dot(a, b)) > 0.02) return false;
+  }
+  return true;
+}
+
+// 물결·지그재그 선(단열재·완충재 표시): 꼭짓점이 많고, 짧은 마디가 왼쪽·오른쪽으로 번갈아 꺾인다.
+// 곡벽(호를 잘게 나눈 선)은 한쪽으로만 꺾여 여기 걸리지 않는다
+export function isWiggle(pts) {
+  if (pts.length < 8) return false;
+  const segL = [];
+  let flips = 0;
+  let prev = 0;
+  for (let i = 1; i < pts.length; i++) {
+    segL.push(len(sub(pts[i], pts[i - 1])));
+    if (i + 1 < pts.length) {
+      const c = cross(sub(pts[i], pts[i - 1]), sub(pts[i + 1], pts[i]));
+      const sgn = Math.abs(c) < 1e-12 ? 0 : Math.sign(c);
+      if (sgn && prev && sgn !== prev) flips++;
+      if (sgn) prev = sgn;
+    }
+  }
+  segL.sort((a, b) => a - b);
+  return flips >= 3 && segL[Math.floor(segL.length / 2)] < 0.12;
 }
 
 // 끊어 그린 벽: 같은 직선 위에서 맞닿은 선분을 하나로 잇는다. 양쪽 면이 다른 곳에서 끊겨도 짝을 찾게 한다
@@ -370,7 +404,84 @@ export function extendToJunctions(walls) {
       }
     }
   }
-  return out;
+  // 문틈 잇기는 다른 벽이 늘어난 뒤에야 닿는 곳이 생기므로 바뀌지 않을 때까지(최대 3번)
+  for (let k = 0; k < 3 && bridgeDoorEnds(out); k++);
+  return [...out, ...joinOffsetEnds(out)];
+}
+
+// 같은 외벽인데 두께·중심이 조금 달라(10cm 안쪽) 일직선으로 못 이은 두 벽: 서로 마주 보는 끊긴 끝을 짧은 벽으로 잇는다(1.3m 넘으면 안 함)
+function joinOffsetEnds(walls) {
+  const free = [];
+  const touches = (p, self) => walls.some((v) => v !== self && distSeg(p, v) <= Math.max(v.t, self.t) / 2 + 0.02);
+  walls.forEach((w) => { for (const end of ['a', 'b']) if (!touches(w[end], w)) free.push({ w, p: w[end], d: unit(sub(w[end], end === 'a' ? w.b : w.a)) }); });
+  const used = new Set();
+  const added = [];
+  for (const f of free) {
+    if (used.has(f)) continue;
+    let best = null;
+    for (const g of free) {
+      if (g === f || g.w === f.w || used.has(g)) continue;
+      if (Math.abs(cross(f.d, g.d)) > Math.sin((5 * Math.PI) / 180) || dot(f.d, g.d) > -0.9) continue; // 마주 보는 방향
+      const v = sub(g.p, f.p);
+      const along = dot(v, f.d);
+      const lat = Math.abs(cross(f.d, v));
+      if (along < 0 || along > DOOR_REACH || lat > Math.max(f.w.t, g.w.t) + 0.05) continue;
+      const dist = len(v);
+      if (!best || dist < best.dist) best = { g, dist, along };
+    }
+    if (!best || best.dist < 1e-4) continue;
+    used.add(f);
+    used.add(best.g);
+    const t = Math.min(f.w.t, best.g.w.t);
+    added.push({ a: f.p, b: best.g.p, t, hs: [], conf: 0.4, joined: true, openings: best.along >= TOL.minOpening ? [{ s0: 0, s1: best.dist, kind: 'opening', insert: null, bridged: true }] : [] });
+  }
+  return added;
+}
+
+function distSeg(p, v) {
+  const d = sub(v.b, v.a);
+  const L2 = dot(d, d) || 1;
+  const k = Math.max(0, Math.min(1, dot(sub(p, v.a), d) / L2));
+  return len(sub(p, add(v.a, mulv(d, k))));
+}
+
+// 벽 끝에 붙은 문(벽 → 문틈 → 직각 벽): 아무 벽에도 닿지 않은 끝을 1.3m 안의 벽까지 늘리고 늘린 곳은 개구부로 둔다.
+// 실제 도서에서 이 틈 때문에 방이 닫히지 않아 실이 거의 생기지 않았다
+const DOOR_REACH = 1.3;
+function bridgeDoorEnds(walls) {
+  let changed = false;
+  const touches = (p, self) => walls.some((v) => v !== self && distSeg(p, v) <= Math.max(v.t, self.t) / 2 + 0.02);
+  for (const w of walls) {
+    for (const end of ['a', 'b']) {
+      const p = w[end];
+      if (touches(p, w)) continue;
+      const other = end === 'a' ? w.b : w.a;
+      const d = unit(sub(p, other));
+      let best = null;
+      for (const v of walls) {
+        if (v === w) continue;
+        const e = unit(sub(v.b, v.a));
+        if (Math.abs(cross(d, e)) < Math.sin((30 * Math.PI) / 180)) continue; // 거의 직각인 벽만
+        const h = lineHit(p, d, v.a, v.b);
+        if (!h || h.u < 0 || h.u > 1) continue;
+        if (h.s <= 0 || h.s > DOOR_REACH + v.t / 2) continue;
+        if (!best || h.s < best.s) best = { s: h.s, v };
+      }
+      if (!best) continue;
+      const ext = best.s;
+      const np = add(p, mulv(d, ext));
+      const L0 = len(sub(w.b, w.a));
+      if (end === 'a') {
+        w.openings = w.openings.map((o) => ({ ...o, s0: o.s0 + ext, s1: o.s1 + ext }));
+        if (ext - best.v.t / 2 >= TOL.minOpening) w.openings.unshift({ s0: 0, s1: ext - best.v.t / 2, kind: 'opening', insert: null, bridged: true });
+      } else if (ext - best.v.t / 2 >= TOL.minOpening) {
+        w.openings.push({ s0: L0, s1: L0 + ext - best.v.t / 2, kind: 'opening', insert: null, bridged: true });
+      }
+      w[end] = np;
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 const snap = (p, q = 0.001) => [Math.round(p[0] / q) * q, Math.round(p[1] / q) * q];
@@ -445,7 +556,47 @@ export function extractWalls(items, roles, uf, { inserts = [] } = {}) {
   const input = collectWallInput(items, roles, uf);
   const { pieces: linePieces, unmatched } = pairWalls(input.segs);
   const { pieces: solid, columns: solidCols } = solidPieces(input.solids);
-  const walls = extendToJunctions(mergeCollinear([...linePieces, ...solid], inserts));
-  const graph = wallGraph(walls);
-  return { walls, graph, columns: [...columnShapes(input.columns), ...solidCols], unmatched };
+  let walls = extendToJunctions(mergeCollinear([...linePieces, ...solid], inserts));
+  let graph = wallGraph(walls);
+  const frames = frameWalls(walls, graph);
+  if (frames.size) {
+    walls = walls.filter((_, i) => !frames.has(i));
+    graph = wallGraph(walls);
+  }
+  return { walls, graph, columns: [...columnShapes(input.columns), ...solidCols], unmatched, frames: frames.size };
+}
+
+// 도면 틀·영역선: 다른 벽과 이어지지도 다가오지도 않는 큰 테두리(3m 넘는 변 12개 이하, 가지 없음, 100㎡ 넘음).
+// 실제 도서에서 이름 없는 레이어의 17m 네모 두 개(320mm 간격)가 단지를 두르는 벽이 되어 285㎡ 가짜 실을 만들었다.
+// 진짜 외벽 고리는 안쪽 벽이 T자로 붙거나(꼭짓점에 벽 3개) 문틈만큼 다가와 있어 걸리지 않는다
+export function frameWalls(walls, graph) {
+  const n = graph.nodes.length;
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (i) => { while (parent[i] !== i) i = parent[i] = parent[parent[i]]; return i; };
+  const deg = new Array(n).fill(0);
+  for (const e of graph.edges) { parent[find(e.u)] = find(e.v); deg[e.u]++; deg[e.v]++; }
+  const comps = new Map();
+  for (const e of graph.edges) {
+    const r = find(e.u);
+    if (!comps.has(r)) comps.set(r, []);
+    comps.get(r).push(e);
+  }
+  const out = new Set();
+  for (const [r, es] of comps) {
+    // 틀은 긴 변 몇 개뿐이고 가지가 없다(겹 네모라 끝이 하나 남을 수 있음)
+    if (es.length > 12 || es.some((e) => deg[e.u] > 2 || deg[e.v] > 2 || len(sub(e.b, e.a)) < 3)) continue;
+    const pts = es.flatMap((e) => [e.a, e.b]);
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    if ((Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys)) < 100) continue;
+    const near = graph.edges.some((o) => find(o.u) !== r && [o.a, o.b].some((p) => es.some((e) => {
+      const d = sub(e.b, e.a);
+      const L2 = dot(d, d) || 1;
+      const k = Math.max(0, Math.min(1, dot(sub(p, e.a), d) / L2));
+      return len(sub(p, add(e.a, mulv(d, k)))) < 0.5;
+    })));
+    if (near) continue;
+    for (const e of es) out.add(e.wall);
+  }
+  return out;
 }

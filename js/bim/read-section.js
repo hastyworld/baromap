@@ -8,7 +8,9 @@ const CH_RE = /^(.{0,14}?)\s*(?:C\.?H|반자\s*높이|천장\s*고|천정\s*고)
 const VOID_RE = /천장\s*(?:속|내부|공간|깊이)\s*[=:：]?\s*([\d,]{2,5})/;
 const FLOOR_H_RE = /층\s*고\s*[=:：]?\s*([\d,]{4,5})/;
 const GROUP_RE = /바닥\s*(?:구성|마감\s*구성|상세|단면)\s*(?:\(([^)]*)\))?/;
-const SLAB_RE = /(?:콘크리트\s*)?슬래브\s*(?:THK\.?\s*)?([\d,]{2,4})|SLAB\s*(?:THK\.?\s*)?([\d,]{2,4})/i;
+// 천장·벽체 구성 묶음(42 지시서 4.3): "천장 구성(거실·침실)", "벽체 구성(외벽)" — 바닥과 같은 모양(머리글 아래 "재료 두께" 줄)
+const PART_GROUPS = [['ceilings', /천[장정]\s*(?:구성|마감\s*구성|상세)\s*(?:\(([^)]*)\))?/], ['walls', /벽체?\s*(?:구성|마감\s*구성)\s*(?:\(([^)]*)\))?/]];
+const SLAB_RE =/(?:콘크리트\s*)?슬래브\s*(?:THK\.?\s*)?([\d,]{2,4})|SLAB\s*(?:THK\.?\s*)?([\d,]{2,4})/i;
 const ROOMISH = /거실|침실|안방|주방|식당|욕실|화장실|현관|발코니|드레스룸|다용도실|실외기실|대피공간|복도|팬트리|펜트리/;
 
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -37,6 +39,25 @@ export function readSection(digest, sheet = {}) {
       lastY = t.y;
     }
     if (layers.length) floors.push({ rooms, layers, pos: [g.x, g.y] });
+  }
+  // 천장·벽체 구성: 같은 방식으로 읽는다(슬래브 구분 없음). 두께 없는 얇은 마감(천장지·도장)도 층으로 받는다
+  const partGroups = { ceilings: [], walls: [] };
+  for (const [part, re] of PART_GROUPS) {
+    for (const g of texts.filter((t) => re.test(t.t) && !GROUP_RE.test(t.t))) {
+      const rooms = (re.exec(g.t)[1] || '').split(/[·,，/、\s]+/).map((x) => x.trim()).filter(Boolean);
+      const col = texts.filter((t) => t !== g && t.y < g.y && Math.abs(t.x - g.x) < Math.max(g.size, t.size) * 2.5).sort((a, b) => b.y - a.y);
+      const layers = [];
+      let lastY = g.y;
+      for (const t of col) {
+        if (lastY - t.y > Math.max(g.size, t.size) * 3.2) break;
+        const m = material(t.t);
+        if (!m.name || m.category === 'other' || /층\s*고|CH\b|구성/i.test(t.t)) break;
+        for (let k = 0; k < (m.plies || 1); k++) layers.push({ material: m.name, category: m.category, thicknessMm: m.thicknessMm });
+        used.add(t);
+        lastY = t.y;
+      }
+      if (layers.length) partGroups[part].push({ rooms, layers, pos: [g.x, g.y] });
+    }
   }
   // 슬래브: 바닥 구성의 구조체 층, 없으면 "슬래브 210" 글자
   const slabs = floors.flatMap((f) => f.layers.filter((l) => l.slab).map((l) => l.thicknessMm));
@@ -69,8 +90,10 @@ export function readSection(digest, sheet = {}) {
     floorHeightMm: fh ? num(fh[1]) : null,
     slabMm,
     floors: floors.map((f) => ({ rooms: f.rooms, layers: f.layers.map(({ pos, ...l }) => l), pos: f.pos })),
+    ceilings: partGroups.ceilings,
+    walls: partGroups.walls,
     rooms,
-    notes: '규칙: 바닥 구성 지시선 글자·CH 표기·층고 글자에서 읽음',
+    notes: '규칙: 바닥·천장·벽체 구성 지시선 글자·CH 표기·층고 글자에서 읽음',
   };
 }
 

@@ -8,15 +8,16 @@ import { PUBLIC_FINDING_LABEL } from '../ops/calc/public-data.js';
 export const SEVERITY = { error: 0, warn: 1, info: 2 };
 export const KIND_LABEL = {
   'floors.mismatch': '층수 불일치', 'levels.conflict': '레벨 충돌', 'units.count': '세대 수', 'unittype.missing': '타입 도면 없음', 'unittype.unmatched': '타입 안 맞음',
-  'finish.code.undefined': '정의 없는 기호', 'finish.code.unused': '안 쓰인 기호', 'finish.room.missing': '마감표에 없는 실', 'finish.assumed': '가정한 마감',
+  'finish.code.undefined': '정의 없는 기호', 'finish.code.unused': '안 쓰인 기호', 'finish.room.missing': '마감표에 없는 실', 'finish.schedule.none': '마감표 없음', 'finish.assumed': '가정한 마감',
   'wall.thickness': '벽 두께', 'wall.unmatched': '벽 못 만든 선', 'opening.host': '벽에 안 붙은 문·창', 'opening.code.undefined': '일람표에 없는 창호', 'opening.size': '창호 크기',
-  'space.unnamed': '이름 없는 실', 'space.area': '면적 차이', 'align.low': '배치 맞춤', 'site.overlap': '동 겹침', 'sheet.unclassified': '종류 모름', 'sheet.failed': '읽기 실패',
+  'space.unnamed': '이름 없는 실', 'space.mirror': '대칭으로 붙인 이름', 'space.area': '면적 차이', 'align.low': '배치 맞춤', 'site.overlap': '동 겹침', 'site.place': '동 위치', 'sheet.unclassified': '종류 모름', 'sheet.failed': '읽기 실패',
   'waterproof.missing': '방수 누락', dim_mismatch: '치수 불일치', ...DOC_FINDING_LABEL,
   'level.stack': '층고 검산', 'struct.slab': '슬래브 두께 불일치', 'struct.wall': '구조 벽 두께 불일치', 'struct.missing': '일람표에 없는 구조 기호',
   'facade.code.undefined': '외부 마감표에 없는 기호', 'facade.height': '최고 높이 차이', 'facade.assumed': '가정한 외관', 'site.terrain': '지형 없음',
   ...PUBLIC_FINDING_LABEL,
 };
 
+const TOP_KINDS = ['site.overlap', 'site.place'];
 const box = (b) => (b ? { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 } : null);
 const ev = (sheetId, bbox, note = '') => ({ sheetId, bbox: box(bbox), note });
 const ptBox = (p, uf, r = 600) => ({ x0: p[0] / uf - r, y0: p[1] / uf - r, x1: p[0] / uf + r, y1: p[1] / uf + r });
@@ -65,7 +66,12 @@ export function runChecks({ files, report, sheets = [], drawingFiles = [] }) {
   const used = new Set(report.usedCodes || []);
   const cat = files['catalog.json'] || { assemblies: [] };
   for (const a of cat.assemblies.filter((x) => x.code && !used.has(x.code))) add('finish.code.unused', 'info', `${a.code}(${a.name})는 정의되어 있지만 평면 어디에도 쓰이지 않았습니다.`, (a.source?.sheets || []).map((s) => ev(s.sheetId, null)));
-  for (const [key, list] of groupBy(report.missingRooms || [], (x) => `${x.typeName}|${x.name}`)) {
+  if (report.noFinishSchedule && (report.missingRooms || []).length) {
+    // 마감표가 아예 없는 도서(일부 도면만 올림): 실마다 경고하면 수십 건이 되어 한 건으로 알린다
+    const list = report.missingRooms;
+    add('finish.schedule.none', 'info', `도서에 실내재료마감표가 없어 실 ${list.length}개의 마감을 비워 두었습니다(젖는 실은 방수로 가정). 마감표를 올리면 채워집니다.`, list.slice(0, 20).map((x) => ev(x.sheetId, x.box, x.name)), list.map((x) => x.spaceId));
+  }
+  for (const [key, list] of report.noFinishSchedule ? [] : groupBy(report.missingRooms || [], (x) => `${x.typeName}|${x.name}`)) {
     const [t, n] = key.split('|');
     add('finish.room.missing', 'warn', `${t} ${n}의 마감이 실내재료마감표에 없습니다(실명 맞춤 실패). 마감은 비워 두고 젖는 실은 방수로 가정했습니다.`, list.map((x) => ev(x.sheetId, x.box, n)), list.map((x) => x.spaceId));
   }
@@ -89,10 +95,15 @@ export function runChecks({ files, report, sheets = [], drawingFiles = [] }) {
     const t = list[0];
     add('opening.size', 'warn', `${code} ${list.length}곳: 창호 일람표 폭 ${t.scheduleMm.toLocaleString()}mm와 평면 블록 폭 ${[...new Set(list.map((x) => x.drawnMm))].map((v) => v.toLocaleString()).join('·')}mm가 다릅니다.`, list.map((x) => ev(x.sheetId, x.box, code)), list.map((x) => x.openingId));
   }
+  if ((report.mirrorNamed || []).length) add('space.mirror', 'info', `이름이 한쪽 세대에만 적힌 대칭(또는 같은) 세대에서 실 ${report.mirrorNamed.length}개의 이름을 짝에서 옮겨 붙였습니다. 맞는지 확인해주세요.`, report.mirrorNamed.map((x) => ev(x.sheetId, x.box, x.name)), report.mirrorNamed.map((x) => x.spaceId));
   if ((report.unnamed || []).length) add('space.unnamed', 'info', `이름 없는 실 ${report.unnamed.length}개(실명 글자가 없는 칸).`, report.unnamed.map((x) => ev(x.sheetId, x.box)), report.unnamed.map((x) => x.spaceId));
   for (const x of report.areaMismatch || []) add('space.area', 'warn', `${x.name} 계산 면적 ${x.computed.toFixed(2)}㎡가 도면 표기 ${x.drawn}㎡와 10% 넘게 다릅니다.`, [ev(x.sheetId, x.box, x.name)], [x.spaceId]);
   for (const a of (report.align || []).filter((x) => x.iou < 0.85)) add('align.low', 'warn', `${a.building} 평면과 배치도 외곽이 잘 맞지 않습니다(겹침 ${Math.round(a.iou * 100)}%). 위치를 확인해주세요.`, a.sheetIds.map((id) => ev(id, null)), [a.buildingId]);
 
+  // 동 위치: 배치도에서 못 찾아 줄지어 놓은 동(경고), 이름 글자 자리에만 놓은 동(정보) — 42 지시서 1절
+  const pl = report.placement;
+  if (pl?.row) add('site.place', 'warn', `배치도에서 동 ${pl.row}개의 위치를 찾지 못해 줄지어 놓았습니다. 실제 위치가 아니니 배치도를 확인해주세요.`, pl.sheetId ? [ev(pl.sheetId, null)] : [], pl.rowIds);
+  if (pl?.label) add('site.place', 'info', `동 ${pl.label}개는 배치도의 이름 글자 자리에 놓았습니다(동 외곽선을 찾지 못해 방향은 주변 선으로 짐작). 위치와 방향을 확인해주세요.`, pl.sheetId ? [ev(pl.sheetId, null)] : [], pl.labelIds);
   // 동 외곽끼리 겹침(격자로 겹친 넓이)
   const B = site.buildings;
   for (let i = 0; i < B.length; i++) {
@@ -132,7 +143,9 @@ export function runChecks({ files, report, sheets = [], drawingFiles = [] }) {
     }
   }
   checkSections({ files, report, types, add });
-  return out.sort((a, b) => SEVERITY[a.severity] - SEVERITY[b.severity] || a.kind.localeCompare(b.kind));
+  // 동 겹침·동 위치는 같은 등급 안에서 맨 위(3D가 통째로 틀려 보이는 문제라 먼저 봐야 한다)
+  const top = (k) => (TOP_KINDS.includes(k) ? TOP_KINDS.indexOf(k) : TOP_KINDS.length);
+  return out.sort((a, b) => SEVERITY[a.severity] - SEVERITY[b.severity] || top(a.kind) - top(b.kind) || a.kind.localeCompare(b.kind));
 }
 
 const STACK_TOL = 10; // mm
@@ -170,6 +183,17 @@ function checkSections({ files, report, types, add }) {
   for (const w of report.details?.structWall || []) {
     add('struct.wall', 'warn', `벽체 ${w.code || w.assemblyId}의 구조체 두께 ${mm(w.coreMm)}mm가 구조 부재 일람표의 벽(${w.structure.join(', ')})에 없습니다.`);
   }
+  // 구조 평면 기호를 벽에 붙였는데 건축 벽체의 구조체 두께와 다르다(43 지시서 3절)
+  for (const [, list] of groupBy(report.details?.structWallMismatch || [], (x) => `${x.mark}|${x.structMm}|${x.coreMm}`)) {
+    const x = list[0];
+    add('struct.wall', 'warn', `구조 평면의 ${x.mark}(${mm(x.structMm)}mm)가 붙은 벽 ${list.length}개는 건축 벽체${x.code ? ` ${x.code}` : ''}의 구조체 두께가 ${mm(x.coreMm)}mm입니다.`,
+      list.map((w) => ev(w.sheetId, w.pos ? { x0: w.pos[0] - 600, y0: w.pos[1] - 600, x1: w.pos[0] + 600, y1: w.pos[1] + 600 } : null, x.mark)), list.map((w) => w.wallId));
+  }
+  // 상세·구조 판독값 일부를 모델 파일에 넣지 못함(파일 안 id 겹침 등): 나머지는 넣었다
+  const failed = report.details?.failedFiles || [];
+  if (failed.length) add('details.failed', 'warn', `단면·상세·구조 판독값 중 파일 ${failed.length}개(연산 ${failed.reduce((a, f) => a + f.ops, 0)}건)는 모델에 넣지 못했습니다. 나머지는 넣었습니다. 첫 오류: ${failed[0].error}`);
+  const unplaced = (report.details?.structPlace || []).filter((x) => !x.method);
+  if (unplaced.length) add('struct.place', 'info', `구조 평면 ${unplaced.length}장은 건축 평면과 좌표를 맞추지 못해(통심 글자·같은 좌표 모두 맞지 않음) 벽 하나하나에는 붙이지 못했습니다. 구조 두께는 벽체 조립체 단위로만 붙였습니다.`, unplaced.map((x) => ev(x.sheetId, null, x.sheetNo)));
   const known = new Set(members.map((m) => m.mark));
   for (const [mark, list] of groupBy((report.details?.structureMarks || []).filter((p) => !known.has(p.mark)), (p) => p.mark)) {
     add('struct.missing', 'warn', `구조 평면의 기호 ${mark}(${list.length}곳)가 구조 부재 일람표에 없습니다.`, list.map((p) => ev(p.sheetId, { x0: p.pos[0] - 600, y0: p.pos[1] - 600, x1: p.pos[0] + 600, y1: p.pos[1] + 600 }, mark)));

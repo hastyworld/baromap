@@ -1,6 +1,7 @@
 // 시트 보기(전체 화면): 도면 한 장을 확대·이동하고 레이어를 켜고 끄며, 표제란·요약(표·범례)을 본다.
 // 근거 상자(빨간 테두리)를 받아 그 자리로 이동한다 — 검증 결과(05)·수정 요청(07)과 공용.
 // 그림은 저장해 둔 시트 모양(.geom.json)을 캔버스에 직접 그려 확대해도 선명하다.
+// 선 모양이 없거나 너무 크면(휴대폰 8MB·PC 60MB) 저장해 둔 그림(PNG·조각 그림)으로 대신 보여 준다(46 지시서 1절).
 import { store } from '../ctx.js';
 import { unpackSheet } from '../cad/flatten.js';
 import { drawItems, drawHighlights, toSheet, toPixel, FONT_STACK } from '../cad/render.js';
@@ -13,13 +14,16 @@ import { DETAIL_KEYS, detailLabel, scopeText } from './detail-keys.js';
 import { parseComposition } from './materials-ko.js';
 import { sheetDetailOps } from './details.js';
 import { applyPatch } from './validate.js';
+import { geomInfo, sheetViewMode, canAskVector, imageFrame, imageRects, tilesInView } from './sheet-mode.js';
 
 // [상세 값] 탭을 여는 판독 종류(38 지시서 4절)
 const DETAIL_KINDS = new Set(['SectionDetailExtract', 'ConstructionDetailExtract', 'StructureScheduleExtract']);
-const STRUCT_KO = { wall: '벽', slab: '슬래브', column: '기둥', beam: '보', other: '기타' };
+const STRUCT_KO = { wall: '벽', slab: '슬래브', column: '기둥', beam: '보', footing: '기초', other: '기타' };
 
 const dark = () => matchMedia('(prefers-color-scheme: dark)').matches;
-let sv = null; // { el, sheet, flat, view, hidden, boxes, canvas, raf, pointers, onSaved }
+// 휴대폰: 폭 768px 미만이거나 터치가 주 입력인 기기
+const isMobile = () => matchMedia('(max-width: 767.98px)').matches || matchMedia('(pointer: coarse)').matches;
+let sv = null; // { el, sheet, mode: 'vector'|'image', frame, flat, img, view, hidden, boxes, canvas, raf, pointers, onSaved }
 let pushed = false;
 
 /**
@@ -50,24 +54,109 @@ export async function openSheetViewer(sheet, { boxes = [], onSaved } = {}) {
     </div>`;
   document.body.append(el);
   document.body.classList.add('board-open');
-  sv = { el, sheet, flat: null, digest: null, view: null, hidden: new Set(), boxes, raf: 0, pointers: new Map(), onSaved, returnFocus: document.activeElement, tab: 'info' };
+  const info = { ...geomInfo(sheet), mobile: isMobile() };
+  sv = { el, sheet, mode: null, want: sheetViewMode(info), frame: null, flat: null, img: null, digest: null, view: null, hidden: new Set(), boxes, raf: 0, pointers: new Map(), onSaved, returnFocus: document.activeElement, tab: 'info' };
   if (!pushed) { history.pushState({ baromapSheet: true }, ''); pushed = true; }
   el.querySelector('[data-act="sv-close"]').focus();
   renderSide();
   const v = sv;
-  try {
-    const [geom, digest, triage] = await Promise.all([store.drawings.sheetAsset(sheet, 'geom'), store.drawings.sheetAsset(sheet, 'digest').catch(() => null), store.drawings.sheetAsset(sheet, 'triage').catch(() => null)]);
-    if (sv !== v) return;
-    v.flat = unpackSheet(geom);
-    v.digest = digest;
-    if (triage?.of?.length === v.flat.items.length) { v.tri = { t: triage, view: 'building', off: new Set(), pick: null }; markVerdicts(); }
-    $('#sv-msg')?.remove();
-    setupCanvas();
-    fit();
+  const digest = store.drawings.sheetAsset(sheet, 'digest').catch(() => null);
+  // 선 모양을 못 받으면(없음·너무 큼·풀기 실패) 오류 글 대신 그림으로
+  let ok = v.want === 'vector' && await loadVector(v);
+  if (sv !== v) return;
+  if (!ok) ok = await loadImage(v);
+  if (sv !== v) return;
+  if (!ok && v.want !== 'vector' && info.hasGeom == null) ok = await loadVector(v); // 그림이 없는 옛 시트는 선으로라도
+  v.digest = await digest;
+  if (sv !== v) return;
+  const m = $('#sv-msg');
+  if (!ok) {
+    if (m) m.textContent = '이 도면은 그림이 아직 없어요.';
     renderSide();
-  } catch (err) {
-    const m = $('#sv-msg');
-    if (m && sv === v) m.textContent = err.message;
+    return;
+  }
+  m?.remove();
+  if (v.mode === 'image' && canAskVector(info)) {
+    el.querySelector('.board-tools').insertAdjacentHTML('afterbegin', `<button type="button" class="icon-btn" data-act="sv-vector" aria-label="선으로 보기" title="선으로 보기">${icon('lines')}</button>`);
+  }
+  setupCanvas();
+  fit();
+  renderSide();
+}
+
+// 선 모양(.geom.json)과 판별 결과를 받아 선 보기로. 실패하면 false(그림 보기로 넘어간다)
+async function loadVector(v) {
+  try {
+    const [geom, triage] = await Promise.all([store.drawings.sheetAsset(v.sheet, 'geom'), store.drawings.sheetAsset(v.sheet, 'triage').catch(() => null)]);
+    if (sv !== v) return false;
+    const flat = unpackSheet(geom);
+    if (!flat?.items || !flat.frame) return false;
+    v.flat = flat;
+    v.frame = flat.frame;
+    v.mode = 'vector';
+    v.img = null;
+    v.el.classList.remove('img-view');
+    if (triage?.of?.length === flat.items.length) { v.tri = { t: triage, view: 'building', off: new Set(), pick: null }; markVerdicts(); }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const loadImg = (url) => new Promise((resolve, reject) => {
+  const img = new Image();
+  img.decoding = 'async';
+  img.onload = () => resolve(img);
+  img.onerror = () => reject(new Error('그림을 받지 못했습니다.'));
+  img.src = url;
+});
+
+// 저장해 둔 전체 그림(PNG)으로 보기. 조각 그림은 확대할 때 받는다
+async function loadImage(v) {
+  if (!v.sheet.imagePath) return false;
+  try {
+    const img = await loadImg(await store.drawings.sheetAsset(v.sheet, 'png'));
+    if (sv !== v) return false;
+    const F = imageFrame(v.sheet, img.naturalWidth, img.naturalHeight);
+    if (!F) return false;
+    v.img = { full: img, F, tiles: new Map() };
+    v.frame = F;
+    v.mode = 'image';
+    v.el.classList.add('img-view');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function tileImg(n) {
+  const T = sv.img.tiles;
+  if (T.has(n)) return T.get(n).img;
+  const rec = { img: null };
+  T.set(n, rec);
+  const v = sv;
+  store.drawings.sheetAsset(v.sheet, `tile:${n}`).then(loadImg).then((img) => { if (sv === v && v.img) { rec.img = img; paint(); } }).catch(() => {});
+  return null;
+}
+
+function blit(ctx, view, img, F) {
+  const r = imageRects(view, F, img.naturalWidth, img.naturalHeight);
+  if (r) ctx.drawImage(img, ...r.s, ...r.d);
+}
+
+// 그림 보기: 흰 종이에 전체 그림, 확대하면 보이는 조각 그림을 위에(다크 모드는 CSS로 뒤집는다)
+function paintImage(ctx, view) {
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, view.width, view.height);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  const { full, F } = sv.img;
+  blit(ctx, view, full, F);
+  const tiles = sv.sheet.meta?.tiles;
+  for (const n of tilesInView(view, tiles, F, full.naturalWidth)) {
+    const r = tiles.regions.find((x) => x?.n === n);
+    const img = r && tileImg(n);
+    if (img) blit(ctx, view, img, r);
   }
 }
 
@@ -86,6 +175,7 @@ export function closeSheetViewer({ fromHistory = false, keepHistory = false } = 
 }
 
 export const sheetViewerOpen = () => Boolean(sv);
+export const sheetViewerState = () => sv; // 화면 확인용(tools/ui-check/sheet-image.mjs)
 
 // ---------------------------------------------------------------- 그리기·확대·이동
 
@@ -143,8 +233,8 @@ function resize() {
 }
 
 function fit(box = null) {
-  if (!sv?.flat) return;
-  const f = sv.flat.frame;
+  if (!sv?.frame) return;
+  const f = sv.frame;
   const [x0, y0, x1, y1] = box || [f.x0, f.y0, f.x1, f.y1];
   const pad = box ? 2.2 : 1.04;
   const s = Math.min(sv.w / ((x1 - x0) * pad || 1), sv.h / ((y1 - y0) * pad || 1));
@@ -163,7 +253,7 @@ function zoomAt(k, px, py, repaint = true) {
 }
 
 function paint() {
-  if (!sv?.flat || !sv.view) return;
+  if (!sv?.view || !(sv.flat || sv.img)) return;
   cancelAnimationFrame(sv.raf);
   sv.raf = requestAnimationFrame(() => {
     if (!sv?.canvas) return;
@@ -174,11 +264,12 @@ function paint() {
       scale: s * dpr, width: sv.canvas.width, height: sv.canvas.height,
     };
     const ctx = sv.canvas.getContext('2d');
-    drawItems(ctx, sv.flat.items, view, { dark: dark(), hidden: sv.hidden, lineWidth: dpr, ...triageView() });
+    if (sv.mode === 'image') paintImage(ctx, view);
+    else drawItems(ctx, sv.flat.items, view, { dark: dark(), hidden: sv.hidden, lineWidth: dpr, ...triageView() });
     const pick = sv.tab === 'triage' && sv.tri?.pick;
     if (pick?.box) drawHighlights(ctx, view, [pick.box], { width: 2 * dpr });
     if (sv.boxes.length) drawHighlights(ctx, view, sv.boxes, { width: 3 * dpr });
-    if (sv.tab === 'extract') {
+    if (sv.tab === 'extract' && sv.mode === 'vector') {
       ctx.font = `${11 * dpr}px ${FONT_STACK}`;
       for (const { p, label, c } of extractPoints(sv.sheet.extracted)) {
         const [x, y] = toPixel(view, p[0], p[1]);
@@ -210,8 +301,11 @@ function renderSide() {
   const s = sv.sheet;
   const d = sv.digest;
   const editable = store.can('edit', s.siteId);
+  // 그림 보기에서는 선 모양이 있어야 하는 탭(레이어·건물만 보기)을 숨긴다
+  const vector = (sv.mode || sv.want) === 'vector';
+  if (!vector && ['layers', 'triage'].includes(sv.tab)) sv.tab = 'info';
   const tabs = `<div class="sv-tabs" role="tablist">
-    ${[['info', '표제란·요약'], ['layers', '레이어'], ...(sv.tri ? [['triage', '건물만 보기']] : []), ...(s.extracted?.data ? [['extract', '판독']] : []), ...(DETAIL_KINDS.has(s.extracted?.kind) ? [['detail', '상세 값']] : []), ...(editable ? [['edit', '종류 고치기']] : [])].map(([k, l]) => `<button type="button" role="tab" class="${sv.tab === k ? 'on' : ''}" aria-selected="${sv.tab === k}" data-act="sv-tab" data-tab="${k}">${l}</button>`).join('')}</div>`;
+    ${[['info', '표제란·요약'], ...(vector ? [['layers', '레이어']] : []), ...(sv.tri && vector ? [['triage', '건물만 보기']] : []), ...(s.extracted?.data ? [['extract', '판독']] : []), ...(DETAIL_KINDS.has(s.extracted?.kind) ? [['detail', '상세 값']] : []), ...(editable ? [['edit', '종류 고치기']] : [])].map(([k, l]) => `<button type="button" role="tab" class="${sv.tab === k ? 'on' : ''}" aria-selected="${sv.tab === k}" data-act="sv-tab" data-tab="${k}">${l}</button>`).join('')}</div>`;
   let body = '';
   if (sv.tab === 'layers') {
     const layers = layerList();
@@ -391,9 +485,15 @@ function extractPoints(ex) {
 
 // ---------------------------------------------------------------- 상세 값(38 지시서 4절 "사람"): 읽은 값·근거 위치·고치기
 
-const posBtn = (p) => (p ? `<button type="button" class="icon-btn dv-pos" data-act="dv-pos" data-x="${p[0]}" data-y="${p[1]}" aria-label="도면에서 위치 보기" title="도면에서 위치 보기">${icon('target')}</button>` : '');
+const posBtn = (p) => (p && sv?.mode === 'vector' ? `<button type="button" class="icon-btn dv-pos" data-act="dv-pos" data-x="${p[0]}" data-y="${p[1]}" aria-label="도면에서 위치 보기" title="도면에서 위치 보기">${icon('target')}</button>` : '');
 const numIn = (name, v, ro, label) => `<input name="${name}" type="number" inputmode="numeric" min="0" step="1" value="${v ?? ''}" ${ro ? 'readonly' : ''} aria-label="${esc(label)}">`;
 const layerText = (layers) => (layers || []).map((l) => `${l.slab ? '콘크리트 슬래브' : l.material} ${l.thicknessMm ?? ''}`.trim()).join(' + ');
+
+// 천장·벽체·상세 층 구성(42 지시서 4.3): 읽은 것을 보여 준다(고치기는 3D의 조립체 고치기에서)
+function partList(title, hint, list) {
+  if (!(list || []).length) return '';
+  return `<h4>${title} <small class="muted">${hint}</small></h4><ul class="dv-list">${list.map((c, i) => `<li class="dv-row"><div class="dv-main"><b>${esc((c.rooms || []).join('·') || `묶음 ${i + 1}`)}</b><small class="muted">${esc(layerText(c.layers))}</small></div>${posBtn(c.pos)}</li>`).join('')}</ul>`;
+}
 
 function detailHtml(s, editable) {
   const ex = s.extracted;
@@ -406,6 +506,7 @@ function detailHtml(s, editable) {
       <div class="grid2"><label class="field"><span>층고(mm)</span>${numIn('floorHeightMm', d.floorHeightMm, ro, '층고')}</label><label class="field"><span>슬래브(mm)</span>${numIn('slabMm', d.slabMm, ro, '슬래브')}</label></div>
       <h4>바닥 구성 <small class="muted">위 → 아래, "재료 두께 + …"</small></h4>
       ${(d.floors || []).map((fl, i) => `<div class="dv-row"><label class="field"><span>${esc(fl.rooms.join('·') || `묶음 ${i + 1}`)}</span><input name="floor-${i}" value="${esc(layerText(fl.layers))}" ${ro ? 'readonly' : ''}></label>${posBtn(fl.pos)}</div>`).join('') || '<p class="muted small">읽은 바닥 구성이 없습니다.</p>'}
+      ${partList('천장 구성', '위 → 아래', d.ceilings)}${partList('벽체 구성', '실외·반대쪽 → 실내', d.walls)}
       <h4>실별 천장고</h4>
       <table class="mini-table dv-table"><tr><th>실</th><th>천장고</th><th>천장 속</th><th></th></tr>${(d.rooms || []).map((r, i) => `<tr><td>${esc(r.name)}</td><td>${numIn(`ceil-${i}`, r.ceilingMm, ro, `${r.name} 천장고`)}</td><td>${numIn(`void-${i}`, r.voidMm, ro, `${r.name} 천장 속`)}</td><td>${posBtn(r.pos)}</td></tr>`).join('')}</table>`;
   } else if (ex.kind === 'ConstructionDetailExtract') {
@@ -416,10 +517,10 @@ function detailHtml(s, editable) {
         return `<li class="dv-row"><div class="dv-main"><b>${esc(detailLabel(x.key))}</b><small class="muted">${esc(x.title || '')}${scope ? ` · ${esc(scope)}` : ''}</small></div>
           <input name="dv-${i}" ${unit === 'mm' ? 'type="number" inputmode="numeric"' : ''} value="${esc(x.value)}" ${ro ? 'readonly' : ''} aria-label="${esc(detailLabel(x.key))}">
           ${editable ? `<label class="dv-del" title="이 값 빼기"><input type="checkbox" name="del-${i}"><span>빼기</span></label>` : ''}${posBtn(x.pos)}</li>`;
-      }).join('')}</ul>`;
+      }).join('')}</ul>${partList('층 구성', '바닥·천장은 위 → 아래, 벽은 실외·반대쪽 → 실내', (d.compositions || []).map((c) => ({ ...c, rooms: [{ floor: '바닥', wall: '벽', ceiling: '천장' }[c.part], ...(c.rooms || [])] })))}`;
   } else {
     rows = `<p class="muted small">구조 부재 ${(d.members || []).length}개 · 평면 기호 ${(d.planMarks || []).length}곳 · ${src}</p>
-      <table class="mini-table dv-table"><tr><th>기호</th><th>부재</th><th>두께·크기(mm)</th></tr>${(d.members || []).map((m, i) => `<tr><td><b>${esc(m.mark)}</b></td><td>${esc(STRUCT_KO[m.kind] || m.kind)}</td><td><input name="mem-${i}" value="${esc(m.sizeMm ? m.sizeMm.join('×') : m.thicknessMm ?? '')}" ${ro ? 'readonly' : ''} aria-label="${esc(m.mark)} 두께"></td></tr>`).join('')}</table>`;
+      <table class="mini-table dv-table dv-struct"><tr><th>기호</th><th>부재</th><th>두께·크기(mm)</th></tr>${(d.members || []).map((m, i) => `<tr><td><b>${esc(m.mark)}</b>${m.floors?.length ? ` <span class="muted small">${esc(m.floors.join(', '))}</span>` : ''}</td><td>${esc(STRUCT_KO[m.kind] || m.kind)}</td><td><input name="mem-${i}" value="${esc(m.sizeMm ? m.sizeMm.join('×') : m.thicknessMm ?? '')}" ${ro ? 'readonly' : ''} aria-label="${esc(m.mark)} 두께"></td></tr>`).join('')}</table>`;
   }
   return `<form class="dv" data-form="dv-save" novalidate>${rows}
     ${editable ? `<div class="dv-btns"><button type="submit" class="btn primary">${icon('check')}저장</button><button type="button" class="btn" data-act="dv-apply">${icon('cube')}모델에 반영(새 버전)</button></div>
@@ -465,7 +566,7 @@ onAction('dv-pos', (el) => {
   if (!sv) return;
   const x = Number(el.dataset.x);
   const y = Number(el.dataset.y);
-  const r = Math.max(200, sv.flat?.frame ? (sv.flat.frame.x1 - sv.flat.frame.x0) / 60 : 400);
+  const r = Math.max(200, sv.frame ? (sv.frame.x1 - sv.frame.x0) / 60 : 400);
   sv.boxes = [[x - r, y - r, x + r, y + r]];
   sv.el.classList.remove('side-open');
   fit(sv.boxes[0]);
@@ -534,6 +635,19 @@ document.addEventListener('change', (e) => {
 });
 
 onAction('sv-close', () => closeSheetViewer());
+// PC에서 큰 도면을 그림으로 열었을 때만: 선 모양을 받아 선 보기로(보던 자리 그대로)
+onAction('sv-vector', async (el) => {
+  if (!sv || sv.mode !== 'image') return;
+  const v = sv;
+  el.disabled = true;
+  el.setAttribute('aria-busy', 'true');
+  const ok = await loadVector(v);
+  if (sv !== v) return;
+  el.remove();
+  if (!ok) return;
+  renderSide();
+  paint();
+});
 onAction('sv-fit', () => fit());
 onAction('sv-zoom', (el) => { if (sv?.view) zoomAt(Number(el.dataset.z), sv.w / 2, sv.h / 2); });
 onAction('sv-tab', (el) => { if (sv) { sv.tab = el.dataset.tab; renderSide(); paint(); } });

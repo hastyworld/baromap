@@ -37,10 +37,11 @@ export const UNIT_M = { 1: 0.0254, 2: 0.3048, 4: 0.001, 5: 0.01, 6: 1 };
 const r0 = (v) => Math.round(v);
 const r1 = (v) => Math.round(v * 10) / 10;
 
-// 단위: $INSUNITS가 있으면 그대로, 없으면 시트 크기로 짐작(건물 도면이 수십~수백 m라고 보고)
+// 단위: $INSUNITS가 있으면 그대로, 없으면 시트 크기로 짐작(건물 도면이 수십~수백 m라고 보고).
+// $INSUNITS가 m·cm인데 그 단위로 도곽이 5km를 넘으면 mm로 그린 파일이다(실제 도서: m로 적힌 mm 도면 — 33km 시트로 읽혀 판별이 수십 분·메모리 부족)
 export function unitFactor(insunits, frame) {
-  if (UNIT_M[insunits]) return UNIT_M[insunits];
   const span = frame ? Math.max(frame.x1 - frame.x0, frame.y1 - frame.y0) : 0;
+  if (UNIT_M[insunits]) return span * UNIT_M[insunits] > 5000 && span * 0.001 <= 5000 ? 0.001 : UNIT_M[insunits];
   if (span > 20000) return 0.001;
   if (span > 2000) return 0.01;
   return 1;

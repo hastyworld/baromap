@@ -48,15 +48,22 @@ export function createPicker(T, { camera, dom, objects, idOf, keeps = () => true
     const now = performance.now();
     const double = Boolean(id) && last.id === id && now - last.t < DOUBLE;
     last = double ? { t: 0, id: null } : { t: now, id };
-    onPick(id, { add: e.shiftKey || e.ctrlKey || e.metaKey, double, hit });
+    onPick(id, { add: e.shiftKey || e.ctrlKey || e.metaKey, double, hit, x: e.clientX, y: e.clientY });
   };
   const onCancel = () => { down = null; clearTimeout(longTimer); };
   dom.addEventListener('pointerdown', onDown);
   dom.addEventListener('pointermove', onMove);
   dom.addEventListener('pointerup', onUp);
   dom.addEventListener('pointercancel', onCancel);
+  // 누른 자리의 광선이 평면(화면 좌표)과 만나는 점 — 위에서 선을 그어 단면 위치를 정할 때
+  const planeAt = (x, y, plane) => {
+    const r = dom.getBoundingClientRect();
+    v.set(((x - r.left) / r.width) * 2 - 1, -((y - r.top) / r.height) * 2 + 1);
+    ray.setFromCamera(v, camera);
+    return ray.ray.intersectPlane(plane, new T.Vector3());
+  };
   return {
-    hitAt,
+    hitAt, planeAt,
     dispose() {
       clearTimeout(longTimer);
       dom.removeEventListener('pointerdown', onDown);

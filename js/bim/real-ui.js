@@ -3,7 +3,7 @@
 //   정보 패널 탭 [측정]: 동 간 거리 표·경계까지·대지 면적·엑셀, [두 점 재기]
 //   외벽 패널 두 번 누르기 → 다가가서 잘라보기(층 구성을 벌려 보기) → 재료 카드
 import { store, q } from '../ctx.js';
-import { addViewerHook, bimViewerState, viewerRedraw, viewerLabels, viewerSelect, viewerRenderTab } from './viewer.js';
+import { addViewerHook, bimViewerState, viewerRedraw, viewerLabels, viewerSelect, viewerRenderTab, setViewerToolMode } from './viewer.js';
 import { addElementAction, addMaterialSection } from './model-panel.js';
 import { createReal, takePhoto, autoQuality, QUALITY_LABEL, PHOTO_NOTE } from './render.js';
 import { sunPosition, sunVector, kstDate } from './sun.js';
@@ -150,7 +150,7 @@ function walkStart(v) {
   ui.walk = { stop() { v.stage.ticks.delete(tick); el.remove(); dom.removeEventListener('pointerdown', down); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('keydown', kd); window.removeEventListener('keyup', ku); controls.enabled = true; }, pos };
   toast(mobile() ? '왼쪽 아래 동그라미를 끌어서 걸어요.' : '방향키(또는 W·A·S·D)로 걷고, 끌어서 둘러봐요. Esc로 끝냅니다.');
 }
-function walkStop(v) { ui.walk?.stop(); ui.walk = null; viewerRedraw(); }
+function walkStop(v) { ui.walk?.stop(); ui.walk = null; setViewerToolMode(ui.pickOn); viewerRedraw(); }
 
 // ---------------------------------------------------------------- 보기 저장·둘러보기·동영상
 
@@ -376,7 +376,7 @@ document.addEventListener('click', async (e) => {
       v.lastPhoto = blob;
       download(`바로맵_렌더_v${v.model.version}.png`, blob);
       toast('사진을 저장했습니다(렌더·참고용 표기 포함).');
-    } else if (d.real === 'walk') { if (ui.walk) walkStop(v); else { walkStart(v); viewerRedraw(); } }
+    } else if (d.real === 'walk') { if (ui.walk) walkStop(v); else { walkStart(v); viewerRedraw(); } setViewerToolMode(Boolean(ui.walk) || ui.pickOn); }
     else if (d.real === 'view') { const w = v.model.stats.views[Number(d.i)]; await flyTo(v, w.camera, 900); }
     else if (d.real === 'view-save') {
       const name = ($('#bv-view-name')?.value || '').trim() || `보기 ${(v.model.stats?.views || []).length + 1}`;
@@ -394,7 +394,7 @@ document.addEventListener('click', async (e) => {
       X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(t2.distances), '동 간 거리');
       X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(t2.boundaries), '경계까지');
       X.writeFile(wb, `바로맵_측정_v${v.model.version}.xlsx`);
-    } else if (d.real === 'pick') { ui.pickOn = !ui.pickOn; if (ui.pickOn) ui.picks = []; refreshTab(v); }
+    } else if (d.real === 'pick') { ui.pickOn = !ui.pickOn; if (ui.pickOn) ui.picks = []; setViewerToolMode(Boolean(ui.walk) || ui.pickOn); refreshTab(v); }
     else if (d.real === 'pick-clear') { ui.picks = []; overlay(v); refreshTab(v); }
     else if (d.real === 'cut') cutaway(v, d.id);
     else if (d.real === 'glb') {

@@ -74,12 +74,19 @@ export function finishAssembly(catalog, kind, text, source) {
 
 /**
  * 마감표 행 찾기: 실명 + 타입(또는 시설 이름). 공백·괄호 차이는 무시.
+ * 실제 도서는 한 행에 실을 묶어 쓴다("보육실,유희실,교사실", "주방/식당", "욕실(17㎡,18㎡)") — 정확히 같은 이름이 없으면
+ * 괄호 속을 뺀 이름·쉼표/빗금으로 나눈 이름으로 찾는다.
  * rows: FinishScheduleExtract.rooms
  */
 export function findFinishRow(rows, roomName, typeName) {
   const norm = (s) => String(s || '').replace(/[\s()（）]/g, '');
   const name = norm(roomName);
-  const candidates = rows.filter((r) => norm(r.roomName) === name);
+  const parts = (s) => {
+    const bare = String(s || '').replace(/[(（][^)）]*[)）]/g, '');
+    return [norm(bare), ...bare.split(/[,，、·/]/).map(norm)].filter(Boolean);
+  };
+  let candidates = rows.filter((r) => norm(r.roomName) === name);
+  if (!candidates.length) candidates = rows.filter((r) => parts(r.roomName).includes(name) || parts(r.roomName).includes(parts(roomName)[0]));
   if (!candidates.length) return null;
   const t = norm(typeName);
   return candidates.find((r) => r.unitTypes.some((u) => norm(u) === t))

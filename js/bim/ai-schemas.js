@@ -268,11 +268,15 @@ export const DocExtract = S.obj({
 // 종류별 추출 스키마(없으면 분류만)
 // 단면·상세·구조(38 지시서): 단위세대 단면에서 슬래브·천장고·바닥 구성, 시공 상세에서 상세 값, 구조도에서 부재 두께
 const FLOOR_LAYER = S.obj({ material: S.str({ maxLength: 40 }), category: S.enm(MATERIAL_CATEGORIES), thicknessMm: NNUM, slab: S.bool() });
+const PART_LAYER = S.obj({ material: S.str({ maxLength: 40 }), category: S.enm(MATERIAL_CATEGORIES), thicknessMm: NNUM });
 export const SectionDetailExtract = S.obj({
   unitType: NSTR,
   floorHeightMm: NNUM,
   slabMm: NNUM,
   floors: S.arr(S.obj({ rooms: S.arr(S.str({ maxLength: 20 }), { maxItems: 20 }), layers: S.arr(FLOOR_LAYER, { maxItems: 12 }), pos: PX }), { maxItems: 10 }),
+  // 천장·벽체 구성(42 지시서 4.3): 천장은 위(천장틀) → 아래(마감), 벽은 실외·반대쪽 → 실내 순서. 도면에 없으면 빈 목록
+  ceilings: S.arr(S.obj({ rooms: S.arr(S.str({ maxLength: 20 }), { maxItems: 20 }), layers: S.arr(PART_LAYER, { maxItems: 12 }), pos: PX }), { maxItems: 10 }),
+  walls: S.arr(S.obj({ rooms: S.arr(S.str({ maxLength: 20 }), { maxItems: 20 }), layers: S.arr(PART_LAYER, { maxItems: 12 }), pos: PX }), { maxItems: 20 }),
   rooms: S.arr(S.obj({ name: S.str({ maxLength: 40 }), ceilingMm: NNUM, voidMm: NNUM, pos: PX }), { maxItems: 60 }),
   notes: S.str({ maxLength: 2000 }),
 });
@@ -286,6 +290,8 @@ export const ConstructionDetailExtract = S.obj({
     appliesTo: SCOPE,
     pos: PX,
   }), { maxItems: 300 }),
+  // 층 구성(42 지시서 4.3): 상세에 그려진 바닥·벽·천장의 층 목록. 바닥·천장은 위 → 아래, 벽은 실외·반대쪽 → 실내. 없으면 빈 목록
+  compositions: S.arr(S.obj({ part: S.enm(['floor', 'wall', 'ceiling', 'roof']), title: S.str({ maxLength: 80 }), rooms: S.arr(S.str({ maxLength: 20 }), { maxItems: 20 }), layers: S.arr(PART_LAYER, { maxItems: 12 }), pos: PX }), { maxItems: 60 }),
   notes: S.str({ maxLength: 2000 }),
 });
 // 시방서·회사 기준 요구사항, 기술검토서(39 지시서 4절). 값이 없으면 null로 비운다
@@ -311,10 +317,13 @@ export const TechReviewExtract = S.obj({
   candidates: S.arr(S.obj({ kind: S.enm(['tower_crane', 'hoist', 'other']), note: S.str({ maxLength: 100 }) }), { maxItems: 20 }),
   notes: S.str({ maxLength: 2000 }),
 });
-export const STRUCT_KINDS = ['wall', 'slab', 'column', 'beam', 'other'];
+export const STRUCT_KINDS = ['wall', 'slab', 'column', 'beam', 'footing', 'other'];
 export const StructureScheduleExtract = S.obj({
-  members: S.arr(S.obj({ mark: S.str({ maxLength: 20 }), kind: S.enm(STRUCT_KINDS), thicknessMm: NNUM, sizeMm: S.nul(S.arr(S.num(), { minItems: 2, maxItems: 2 })), note: S.str({ maxLength: 60 }) }), { maxItems: 300 }),
+  // floors: 같은 기호가 층마다 다를 때 층 범위 글자("1~5F", "6F~PH"), 없으면 빈 목록(43 지시서 2절)
+  members: S.arr(S.obj({ mark: S.str({ maxLength: 20 }), kind: S.enm(STRUCT_KINDS), thicknessMm: NNUM, sizeMm: S.nul(S.arr(S.num(), { minItems: 2, maxItems: 2 })), floors: S.arr(S.str({ maxLength: 20 }), { maxItems: 10 }), note: S.str({ maxLength: 60 }) }), { maxItems: 300 }),
   planMarks: S.arr(S.obj({ mark: S.str({ maxLength: 20 }), pos: PX }), { maxItems: 3000 }),
+  // 구조 평면의 통심 글자(X1·Y1 …)와 자리 — 건축 평면과 좌표를 맞추는 데 쓴다(43 지시서 3절). 없으면 빈 목록
+  grid: S.arr(S.obj({ label: S.str({ maxLength: 6 }), pos: PX }), { maxItems: 200 }),
   notes: S.str({ maxLength: 2000 }),
 });
 

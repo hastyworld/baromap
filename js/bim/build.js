@@ -3,15 +3,18 @@
 // 같은 입력이면 같은 결과(결정적). 화면 코드 없음 — 브라우저 워커와 Node 테스트 공용.
 import { createCatalog, findFinishRow } from './finishes.js';
 import { analyzePlan, buildType, groupUnits, labelGroups, matchType, newReport, COMMON, source } from './units.js';
-import { buildingLevels, floorNo } from './levels.js';
+import { dimRatio } from './dim-zones.js';
+import { buildingLevels, floorNo, levelsForFloors } from './levels.js';
 import { analyzeSite } from './site.js';
-import { alignOutline } from './align.js';
+import { alignOutline, applyTransform } from './align.js';
+import { rowLayout, findLabels } from './site-place.js';
 import { BIM_SCHEMA, upgradeFiles } from './upgrade.js';
 import { applyDetails } from './details.js';
+import { gridOf } from './struct-place.js';
 import { buildFacade, readElevation, readRoof } from './facade.js';
 import { readSiteDetail, heightAt, baseOf } from './site-detail.js';
 import { hashId, slug, rp, r3 } from './ids.js';
-import { boxOf, centroid, area as polyArea } from '../cad/geom.js';
+import { boxOf, centroid, area as polyArea, hull } from '../cad/geom.js';
 
 export { BIM_SCHEMA };
 const unitLabel = (floor, line) => (/^\d{1,2}$/.test(line) ? `${floor}${String(line).padStart(2, '0')}` : `${floor}${line}`);
@@ -48,6 +51,7 @@ export function buildModel({ siteId, sheets, geomBySheet, progress = { buildings
   for (const s of by('window_schedule')) for (const it of s.extracted?.data?.items || []) if (!schedule.has(it.code)) schedule.set(it.code, { ...it, sheetId: s.id });
   const hasSchedule = schedule.size > 0;
   const finish = rows.length ? rows : null;
+  report.noFinishSchedule = !rows.length; // 도서에 실내재료마감표가 없음(실마다 경고하지 않고 한 건으로)
 
   // ---- 2. 세대 타입·시설 타입
   const types = new Map();
@@ -76,8 +80,19 @@ export function buildModel({ siteId, sheets, geomBySheet, progress = { buildings
   }
 
   // ---- 3. 단지
-  const siteSheet = by('site_plan')[0];
-  const site = siteSheet && geom(siteSheet) ? analyzeSite(siteSheet, geom(siteSheet), { uf: ufOf(siteSheet) }) : null;
+  // 배치도로 분류된 시트가 여럿이면(도면번호만 보고 분류된 것 포함) 동 이름 글자가 가장 많은 시트를 쓴다(42 지시서 1절)
+  const planNames = [...new Set(by('floor_plan').flatMap((s) => s.refs?.buildings || []))];
+  const siteSheets = by('site_plan').filter((s) => geom(s));
+  let siteSheet = siteSheets[0] || null;
+  if (siteSheets.length > 1) {
+    const score = (s) => {
+      const hasOutline = Object.values(s.layerRoles || {}).includes('building_outline') ? 1 : 0;
+      const hit = planNames.length ? new Set(findLabels(geom(s).items, planNames, ufOf(s)).map((l) => l.name)).size : 0;
+      return hit * 10 + hasOutline * 5 + (/배치/.test(s.title || '') ? 3 : 0) + (s.extracted?.data?.buildings?.length ? 1 : 0);
+    };
+    siteSheet = siteSheets.map((s) => ({ s, v: score(s) })).sort((a, z) => z.v - a.v)[0].s;
+  }
+  const site = siteSheet ? analyzeSite(siteSheet, geom(siteSheet), { uf: ufOf(siteSheet), names: planNames }) : null;
 
   // ---- 4. 동: 평면(기준층·1층 등) → 층 템플릿
   const planSheets = by('floor_plan');
@@ -91,6 +106,7 @@ export function buildModel({ siteId, sheets, geomBySheet, progress = { buildings
     const mySheets = planSheets.filter((s) => (s.refs?.buildings || []).includes(name) && geom(s));
     const typical = mySheets.find((s) => (s.refs?.floors || []).some((f) => /기준층/.test(f))) || mySheets.find((s) => !(s.refs?.floors || []).length) || mySheets[0] || null;
     const templates = [];
+    const frames = []; // 층 템플릿마다 건축 평면의 좌표 틀(구조 평면 기호 맞추기, 43 지시서 3절)
     let outline = null;
     let origin = null;
     let typicalPlan = null;
@@ -100,6 +116,7 @@ export function buildModel({ siteId, sheets, geomBySheet, progress = { buildings
       origin = [ob[0], ob[1]];
       outline = typicalPlan.outline.map((p) => rp([p[0] - origin[0], p[1] - origin[1]]));
       templates.push(floorTemplate(typicalPlan, { id: 'ft_typ', name: '기준층', kind: 'typical', origin, types, catalog, report, building: name, hasSchedule }));
+      frames.push({ templateId: 'ft_typ', sheetId: typical.id, uf: ufOf(typical), origin, grid: gridOf(geom(typical).items), typical: true });
       collectCodes(typicalPlan, report, typical);
     }
     for (const s of mySheets) {
@@ -108,7 +125,11 @@ export function buildModel({ siteId, sheets, geomBySheet, progress = { buildings
       const shift = typicalPlan ? spaceShift(typicalPlan, plan) : [0, 0];
       const o = origin ? [origin[0] + shift[0], origin[1] + shift[1]] : boxOf(plan.outline);
       const floors = (s.refs?.floors || []).join(',');
-      templates.push(floorTemplate(plan, { id: `ft_${slug(floors || s.sheetNo)}`, name: floors || s.title, kind: /^1(층|F)/.test(floors) ? 'first' : 'other', floors: s.refs?.floors || [], origin: [o[0], o[1]], types, catalog, report, building: name, hasSchedule }));
+      // 템플릿 id: 층 글자(없으면 도면번호). 실제 도서는 둘 다 비거나 같은 시트가 여럿이라 같은 id가 나왔다 → 뒤에 번호
+      let ftId = `ft_${slug(floors || s.sheetNo)}`;
+      for (let k = 2; templates.some((t) => t.id === ftId); k++) ftId = `ft_${slug(floors || s.sheetNo)}_${k}`;
+      templates.push(floorTemplate(plan, { id: ftId, name: floors || s.title, kind: /^1(층|F)/.test(floors) ? 'first' : 'other', floors: s.refs?.floors || [], origin: [o[0], o[1]], types, catalog, report, building: name, hasSchedule }));
+      frames.push({ templateId: templates[templates.length - 1].id, sheetId: s.id, uf: ufOf(s), origin: [o[0], o[1]], grid: gridOf(geom(s).items), typical: false });
       collectCodes(plan, report, s);
       if (!outline) outline = plan.outline.map((p) => rp([p[0] - o[0], p[1] - o[1]]));
     }
@@ -116,7 +137,10 @@ export function buildModel({ siteId, sheets, geomBySheet, progress = { buildings
       outline = facilityType.outline;
       templates.push({ id: 'ft_1', name: '1층', kind: 'facility', levelIds: [], walls: [], columns: [], openings: [], spaces: [], cores: [], units: [{ id: hashId('ui_', id, facilityType.id), line: null, unitTypeId: facilityType.id, transform: { x: 0, y: 0, rotDeg: 0, mirror: false } }] });
     }
-    buildings.push({ id, name, kind, fp, templates, outline, sheets: mySheets });
+    // 세대 배치 id(도면번호·동·라인 해시)가 템플릿 사이에 겹치면 뒤에 번호(파일 안 id가 겹치면 수정 연산이 거부된다)
+    const seenUi = new Set();
+    for (const t of templates) for (const u of t.units) { let uid = u.id; for (let k = 2; seenUi.has(uid); k++) uid = `${u.id}_${k}`; u.id = uid; seenUi.add(uid); }
+    buildings.push({ id, name, kind, fp, templates, frames, outline, sheets: mySheets });
   }
 
   // ---- 5. 레벨·층 템플릿 배치·세대 목록·단지 좌표
@@ -135,7 +159,7 @@ export function buildModel({ siteId, sheets, geomBySheet, progress = { buildings
       if (t.kind === 'typical') t.levelIds = levels.filter((l) => l.kind === 'typical' || l.kind === 'top').map((l) => l.id);
       else if (t.kind === 'first') t.levelIds = levels.filter((l) => floorNo(l.name) === 1).map((l) => l.id);
       else if (t.kind === 'facility') t.levelIds = levels.filter((l) => floorNo(l.name) != null).map((l) => l.id);
-      else t.levelIds = levels.filter((l) => (t.floors || []).some((f) => f.replace(/층$/, 'F') === l.name)).map((l) => l.id);
+      else t.levelIds = levelsForFloors(t.floors || [], levels).map((l) => l.id); // 범위·지하·최하층·최상층·지붕(45 지시서 5.1)
     }
     // 1층 평면이 따로 있으면 기준층 템플릿에서 1층을 뺀다
     const typ = b.templates.find((t) => t.kind === 'typical');
@@ -154,7 +178,10 @@ export function buildModel({ siteId, sheets, geomBySheet, progress = { buildings
               const ln = pb.lines.find((x) => String(x.name) === String(inst.line));
               if (!ln || f < ln.from || f > ln.to) continue;
             }
-            units.push({ id: `un_${slug(b.name)}_${unitLabel(f, inst.line)}`, unitKey: `${f}:${inst.line}`, label: unitLabel(f, inst.line), levelId: lid, line: String(inst.line), unitTypeId: inst.unitTypeId, transform: inst.transform, templateId: t.id });
+            // 같은 층·라인이 두 번 나오면(템플릿 둘이 같은 층을 덮을 때) id 뒤에 번호 — 파일 안 id가 겹치면 수정 연산이 거부된다
+            let uid = `un_${slug(b.name)}_${unitLabel(f, inst.line)}`;
+            for (let k = 2; units.some((u) => u.id === uid); k++) uid = `un_${slug(b.name)}_${unitLabel(f, inst.line)}_${k}`;
+            units.push({ id: uid, unitKey: `${f}:${inst.line}`, label: unitLabel(f, inst.line), levelId: lid, line: String(inst.line), unitTypeId: inst.unitTypeId, transform: inst.transform, templateId: t.id });
           }
         }
       }
@@ -162,8 +189,9 @@ export function buildModel({ siteId, sheets, geomBySheet, progress = { buildings
       if (pb) {
         if (pb.lines.length !== lines.length) report.unitsCount.push({ building: b.name, plan: lines.length, progress: pb.lines.length, sheetId: b.sheets[0]?.id });
       } else if (lines.length) {
-        const fl = (typ?.levelIds || []).map((lid) => floorNo(levels.find((l) => l.id === lid)?.name || '')).filter((x) => x != null);
-        report.progressProposals.push({ building: b.name, lines: lines.map((ln) => ({ name: ln, from: Math.min(...fl), to: Math.max(...fl) })) });
+        const fl = (typ?.levelIds || []).map((lid) => floorNo(levels.find((l) => l.id === lid)?.name || '')).filter((x) => Number.isFinite(x));
+        // 층을 하나도 못 찾았으면 제안하지 않는다(화면에 "Infinity~-Infinity층"으로 나오던 문제, 실제 도서 시험 2026-11-09)
+        if (fl.length) report.progressProposals.push({ building: b.name, lines: lines.map((ln) => ({ name: ln, from: Math.min(...fl), to: Math.max(...fl) })) });
       }
     }
     // 층수 비교: 배치도 글자 / 입·단면 / 골구도
@@ -172,14 +200,23 @@ export function buildModel({ siteId, sheets, geomBySheet, progress = { buildings
     report.floors.push({ building: b.name, buildingId: b.id, siteText: textN, levels: L.assumed ? null : L.floorsAbove, progressTop, siteSheet: siteSheet ? { sheetId: siteSheet.id, box: b.fp?.source?.sheets?.[0]?.bbox } : null, levelSheets: ex.map((x) => ({ sheetId: x.sheet.id, sheetNo: x.sheet.sheetNo })) });
     // 단지 좌표
     let transform = { x: 0, y: 0, rotDeg: 0 };
-    if (b.fp && b.outline?.length) {
-      const a = alignOutline(b.outline, b.fp.polygon);
+    if (b.fp?.labelOnly) {
+      // 배치도에 이름 글자만 있는 동: 평면 외곽의 가운데를 글자 자리에, 방향은 주변 선의 주된 방향
+      const ob = boxOf(b.outline?.length ? b.outline : [[0, 0]]);
+      const c = applyTransform({ x: 0, y: 0, rotDeg: b.fp.deg || 0 }, [(ob[0] + ob[2]) / 2, (ob[1] + ob[3]) / 2]);
+      transform = { x: r3(b.fp.at[0] - c[0]), y: r3(b.fp.at[1] - c[1]), rotDeg: b.fp.deg || 0 };
+      b.placed = 'label';
+    } else if (b.fp && b.outline?.length) {
+      // 외부 참조 묶음에서 얻은 외곽은 볼록 외곽이라 평면 외곽도 볼록 외곽으로 맞춘다
+      const a = alignOutline(b.fp.hull ? hull(b.outline) : b.outline, b.fp.polygon);
+      b.placed = 'plan';
       transform = { x: a.x, y: a.y, rotDeg: a.rotDeg };
       report.align.push({ building: b.name, buildingId: b.id, iou: a.iou, sheetIds: [b.sheets[0]?.id, siteSheet?.id].filter(Boolean) });
     } else if (b.fp) {
       const c = centroid(b.fp.polygon);
       transform = { x: r3(c[0]), y: r3(c[1]), rotDeg: 0 };
       b.outline = b.fp.polygon.map((p) => rp([p[0] - c[0], p[1] - c[1]]));
+      b.placed = 'plan';
     }
     const height = r3(levels.filter((l) => l.kind !== 'basement').reduce((s, l) => s + (l.height || 0), 0));
     const file = `b-${b.id}.json`;
@@ -194,12 +231,29 @@ export function buildModel({ siteId, sheets, geomBySheet, progress = { buildings
     b.json = bjson;
     siteBuildings.push({
       id: b.id, name: b.name, kind: b.kind, file,
-      footprint: b.fp?.polygon || (b.outline || []).map((p) => rp([p[0] + transform.x, p[1] + transform.y])),
+      footprint: b.fp?.polygon || (b.outline || []).map((p) => rp(applyTransform(transform, p))),
       floorsAbove: L.floorsAbove || textN || 1, floorsBelow: levels.filter((l) => l.kind === 'basement').length, height: height || r3((L.floorsAbove || 1) * 2.9),
       progressBuildingId: pb?.id || null,
       source: b.fp?.source || { method: 'assumed', sheets: [], confidence: 0.3 },
+      ...(b.placed === 'label' ? { placed: 'label' } : {}),
     });
   }
+
+  // ---- 5-1. 배치도에서 자리를 못 찾은 동은 원점에 겹치지 않게 줄지어 놓는다(42 지시서 1.3)
+  const lost = buildings.filter((b) => !b.placed);
+  if (lost.length) {
+    const placedPts = siteBuildings.filter((sb) => buildings.find((b) => b.id === sb.id)?.placed).flatMap((sb) => sb.footprint || []);
+    const ts = rowLayout(lost.map((b) => ({ outline: b.outline || [] })), [...placedPts, ...(site?.boundary || [])]);
+    lost.forEach((b, i) => {
+      Object.assign(b.json.transform, ts[i]);
+      const sb = siteBuildings.find((x) => x.id === b.id);
+      sb.footprint = (b.outline || []).map((p) => rp(applyTransform(ts[i], p)));
+      sb.placed = 'row';
+      b.placed = 'row';
+    });
+  }
+  const placement = { total: buildings.length, plan: buildings.filter((b) => b.placed === 'plan').length, label: buildings.filter((b) => b.placed === 'label').length, row: lost.length };
+  report.placement = { ...placement, sheetId: siteSheet?.id || null, rowIds: lost.map((b) => b.id), labelIds: buildings.filter((b) => b.placed === 'label').map((b) => b.id) };
 
   // ---- 5-2. 단지 확장: 지형·포장·수목·시설물(21 지시서 4절)
   const detail = { terrain: null, pavings: [], trees: [], features: [] };
@@ -258,7 +312,7 @@ export function buildModel({ siteId, sheets, geomBySheet, progress = { buildings
   // ---- 6. 파일
   const siteJson = {
     boundary: site?.boundary || [], roads: site?.roads || [], landscape: site?.landscape || [], underground: site?.underground || [],
-    buildings: siteBuildings, northDeg: site?.northDeg ?? 0, source: site?.source || null, ...detail, baseElevation: r3(siteBase),
+    buildings: siteBuildings, northDeg: site?.northDeg ?? 0, source: site?.source || null, ...detail, baseElevation: r3(siteBase), placement,
   };
   const files = { 'site.json': siteJson, 'catalog.json': catalog.toJSON() };
   const unitTypeFiles = {};
@@ -283,15 +337,22 @@ export function buildModel({ siteId, sheets, geomBySheet, progress = { buildings
   report.counts = summary;
   report.usedCodes = [...new Set(report.usedCodes)].sort();
   report.definedCodes = [...new Set(report.definedCodes)].sort();
-  // 단면·상세·구조 판독값(38 지시서)은 수정 연산으로 붙인다
+  // 단면·상세·구조 판독값(38 지시서)은 수정 연산으로 붙인다. 구조 평면 기호는 건축 평면 좌표 틀로 벽·실에(43 지시서 3절)
+  report.planFrames = buildings.flatMap((b) => b.frames.map((f) => ({ ...f, buildingId: b.id, building: b.name, file: buildingFiles[b.id] })));
   const out = applyDetails(upgradeFiles(files), sheets, report);
   return { files: out, summary: out['index.json'].summary, report };
 }
 
 // 평면에 쓰인 마감·벽체 기호(정의 없는 기호 찾기용)
 // 치수 검산(19 5절): 치수 글자와 그려진 길이가 다르면 축척·단위 오류이거나 글자를 고쳐 쓴 것이다
-function checkDims(plan, report) {
-  const off = (plan.dims || []).filter((d) => d.lenM > 0 && Math.abs(d.value - d.lenM * 1000) > Math.max(5, d.value * 0.01));
+// 평면 안 확대 상세(축척 구역) 안의 치수는 그 구역 축척으로 견주고, 평면 축척을 몰라 배를 모르면 견주지 않는다(41 지시서 2.6)
+export function checkDims(plan, report) {
+  const zones = plan.dimZones || [];
+  const off = (plan.dims || []).filter((d) => {
+    if (!(d.lenM > 0)) return false;
+    const k = d.at ? dimRatio(zones, [d.at[0] * plan.uf, d.at[1] * plan.uf]) : 1;
+    return k != null && Math.abs(d.value - d.lenM * 1000 * k) > Math.max(5, d.value * 0.01);
+  });
   if (!off.length) return;
   const ratios = off.map((d) => d.value / (d.lenM * 1000)).sort((a, b) => a - b);
   const median = ratios[Math.floor(ratios.length / 2)];

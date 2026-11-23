@@ -51,6 +51,10 @@ export function planarFaces(graph) {
  * 면 → 실. labels: [{ name, use?, pos:[x,y] (m), size? }]
  * @returns {{ spaces: any[], faceSpace: Map<number, any>, warnings: any[] }}
  */
+// 넓이·둘레가 같은 직사각형의 폭·길이로 띠인지 본다
+const isStrip = (a, per) => { const h = per / 2; const d = Math.sqrt(Math.max(0, h * h - 4 * a)); const w = (h - d) / 2; return w < 0.45 && (h + d) / 2 >= w * 2; };
+const perimeterOf = (poly) => poly.reduce((a, p, i) => a + Math.hypot(poly[(i + 1) % poly.length][0] - p[0], poly[(i + 1) % poly.length][1] - p[1]), 0);
+
 export function makeSpaces(faces, labels, { minArea = 0.5 } = {}) {
   const spaces = [];
   const faceSpace = new Map();
@@ -58,6 +62,8 @@ export function makeSpaces(faces, labels, { minArea = 0.5 } = {}) {
   for (const f of faces) {
     if (f.outer || f.area < minArea) continue;
     const inside = labels.filter((l) => pointInPolygon(l.pos[0], l.pos[1], f.poly));
+    // 이름 없는 띠 모양 면(벽 중심선 폭 0.45m 미만, 길이가 폭의 두 배 넘음 — 겹벽 사이 틈)은 실이 아니라 벽 사이 틈이다
+    if (!inside.length && isStrip(f.area, perimeterOf(f.poly))) continue;
     inside.sort((a, b) => (b.size || 0) - (a.size || 0));
     const name = inside[0]?.name || null;
     if (inside.length > 1 && new Set(inside.map((l) => l.name)).size > 1) {

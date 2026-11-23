@@ -33,7 +33,13 @@ export function sniffHeader(bytes) {
   return { acadver: val('$ACADVER'), codepage: val('$DWGCODEPAGE').toUpperCase() };
 }
 
-// 스트리밍으로 읽을 때 쓸 글자 해독기 이름(파일 앞부분만 보고 정한다)
+// 헤더 판이 2007 이후(AC1021+)인지: 이 판은 글자가 UTF-8이다
+export function utf8Version(bytes) {
+  const ver = parseInt(sniffHeader(bytes).acadver.replace(/^AC/, ''), 10);
+  return ver >= 1021;
+}
+
+// 스트리밍으로 읽을 때 쓸 글자 해독기 이름(파일 앞부분만 보고 정한다). 2007 이후는 UTF-8(깨진 바이트는 그 자리만 대체 문자 — 파일 전체를 CP949로 읽지 않는다)
 export function encodingFor(bytes) {
   const { acadver, codepage } = sniffHeader(bytes);
   const ver = parseInt(acadver.replace(/^AC/, ''), 10);
@@ -43,19 +49,70 @@ export function encodingFor(bytes) {
 
 export const unescapeUnicode = (s) => s.replace(/\\U\+([0-9A-Fa-f]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
 
+// UTF-8로 맞는지(바이트 범위 [s, e)): 줄마다 TextDecoder를 만들지 않으려고 직접 센다
+function validUtf8(b, s, e) {
+  for (let i = s; i < e;) {
+    const c = b[i];
+    if (c < 0x80) { i++; continue; }
+    const n = c >= 0xc2 && c <= 0xdf ? 1 : c >= 0xe0 && c <= 0xef ? 2 : c >= 0xf0 && c <= 0xf4 ? 3 : -1;
+    if (n < 0 || i + n >= e) return false;
+    for (let k = 1; k <= n; k++) if ((b[i + k] & 0xc0) !== 0x80) return false;
+    i += n + 1;
+  }
+  return true;
+}
+
+/**
+ * 2007 이후 형식(UTF-8이 맞는 판)인데 몇 바이트가 깨진 파일: 파일 전체를 CP949로 다시 읽지 않고(한글이 모두 깨진다),
+ * 깨진 줄만 CP949로 다시 읽어 본다. 그래도 안 되면 그 줄만 대체 문자로 둔다(45 지시서 3절)
+ * @returns {{ text: string, cp949Lines: number, badLines: number }}
+ */
+export function decodeUtf8Lines(bytes) {
+  const utf8 = new TextDecoder('utf-8');
+  const cp949 = new TextDecoder('euc-kr', { fatal: true });
+  const parts = [];
+  let good = 0; // 아직 내보내지 않은 맞는 구간의 시작
+  let cp949Lines = 0;
+  let badLines = 0;
+  for (let ls = 0; ls < bytes.length;) {
+    let le = bytes.indexOf(0x0a, ls);
+    le = le < 0 ? bytes.length : le + 1;
+    let high = false;
+    for (let i = ls; i < le; i++) if (bytes[i] >= 0x80) { high = true; break; }
+    if (high && !validUtf8(bytes, ls, le)) {
+      if (ls > good) parts.push(utf8.decode(bytes.subarray(good, ls)));
+      const line = bytes.subarray(ls, le);
+      try { parts.push(cp949.decode(line)); cp949Lines++; } catch { parts.push(utf8.decode(line)); badLines++; }
+      good = le;
+    }
+    ls = le;
+  }
+  if (good < bytes.length) parts.push(utf8.decode(bytes.subarray(good)));
+  return { text: parts.join(''), cp949Lines, badLines };
+}
+
 /**
  * 파일 바이트 → 글자. UTF-8로 깨짐 없이 읽히면 UTF-8(영문만 있는 파일 포함), 아니면 헤더의 코드페이지(없으면 CP949).
- * @returns {{ text: string, encoding: string }}
+ * 2007 이후 형식은 UTF-8이 맞으므로 깨진 줄만 다시 읽는다(fixed: { cp949Lines, badLines }).
+ * @returns {{ text: string, encoding: string, fixed?: { cp949Lines: number, badLines: number } }}
  */
 export function decodeBytes(buf) {
   const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
   if (isBinaryDxf(bytes)) throw binaryError();
   let text;
   let encoding = 'utf-8';
+  let fixed = null;
   try {
     text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   } catch {
     encoding = encodingFor(bytes);
+    if (encoding === 'utf-8' && utf8Version(bytes)) {
+      const r = decodeUtf8Lines(bytes);
+      text = r.text;
+      fixed = { cp949Lines: r.cp949Lines, badLines: r.badLines };
+      if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+      return { text: unescapeUnicode(text), encoding, fixed };
+    }
     // 한국 도면은 헤더가 영문(1252)이거나 비어 있어도 실제 내용은 CP949인 경우가 많다 → CP949로 깨짐 없이 읽히면 CP949
     if (encoding === 'utf-8' || encoding === 'windows-1252') {
       try {
